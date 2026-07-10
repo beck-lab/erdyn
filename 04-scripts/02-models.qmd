@@ -294,7 +294,7 @@ tibble(file = list.files("../02-data/02-clean-data/rq1/rdata/")) %>%
     ) %>%
     mutate(er_exc = "er")
   ) %>%
-  filter(er_exc == "er") %>%
+  # filter(er_exc == "er") %>%
   
   # anti_join(
   #   tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%

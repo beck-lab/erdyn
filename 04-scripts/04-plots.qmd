@@ -691,7 +691,7 @@ rq2_int_pred_plot <- function(study, sid, emo_item, ergoal, file, exclusion, er_
 ```{r, eval = F}
 plan(multisession(workers = 6L))
 nested_plots <- tibble(model = c("RQ2-int")) %>%
-  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/models", .)))) %>%
+  mutate(file = map(model, ~list.files(sprintf("../../05-results/%s/models", .)))) %>%
   unnest(file) %>%
   separate(file, c("study", "SID", "emo_item", "ergoal", "er_exc"), sep = "-", remove = F) %>%
   mutate_at(vars(emo_item, ergoal, er_exc), ~str_remove_all(., ".RData")) %>%
@@ -716,6 +716,12 @@ nested_plots <- tibble(model = c("RQ2-int")) %>%
     ))
 plan(sequential)
 closeAllConnections()
+
+tibble(file = list.files("../05-results/plots/RQ2-int/px-traj/png/")) %>%
+  separate(file, c("study", "SID", "emo_item", "ergoal", "er_exc"), sep = "-", remove = F) %>%
+  mutate(er_exc = str_remove_all(er_exc, ".png")) %>%
+  group_by(er_exc) %>%
+  tally()
 ```
 
 ```{r}

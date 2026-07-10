@@ -339,7 +339,7 @@ cor_tab_html_fun <- function(tab, focal, rq, exc, er_exc){
       , caption = sprintf("<strong>Table SX</strong><br><em>RQ3a: Correlations Among %s Parameters</em>", rq)
     ) %>%
     kable_classic(html_font = "Times")
-  save_kable(tab, file = sprintf("../05-results/tables/%s/correlations/%s-%s-%s.html", rq, focal, exc, er_exc))
+  save_kable(tab, file = sprintf("../05-results/tables/%s-correlations/%s-%s-%s.html", rq, focal, exc, er_exc))
   return(tab)
 }
 
@@ -420,7 +420,7 @@ cor_tab_html_fun <- function(tab, focal, rq, exclusion, er_exc){
     kableExtra::group_rows("Positive Emotions: Change Positive Emotions", len/2+1, len) %>%
     add_header_above(c(" " = 3, "Negative Emotions: Change Negative Emotions" = len/2, "Positive Emotions: Change Positive Emotions" = len/2)) %>%
     add_header_above(c(" " = 3, "Zero-Order Correlations" = len))
-  save_kable(tab, file = sprintf("../05-results/tables/%s/correlations/%s-%s-%s.html", rq, focal, exclusion, er_exc))
+  save_kable(tab, file = sprintf("../05-results/tables/%s-correlations/%s-%s-%s.html", rq, focal, exclusion, er_exc))
   return(tab)
 }
 
