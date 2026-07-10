@@ -1,0 +1,124 @@
+---
+title: "ER Dynamics Data Cleaning"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Workspace
+
+## Packages
+
+```{r}
+library(psych)
+library(knitr)
+library(kableExtra)
+library(plyr)
+library(tidyverse)
+
+cb <- readxl::read_excel("../02-data/00-codebooks/erdyn-codebook.xlsx", sheet = 1)
+```
+
+## EMA Data
+
+```{r}
+cb %>% 
+  filter(level == "EMA") %>%
+  select(category, item, item_name, item_text, `Item #`) %>%
+  kable(.
+        , "html"
+        , col.names = c("Category", "Scale", "Item", "Item Text", "Item #")
+        , cap = "Preregistered EMA Variables"
+        ) %>%
+  kable_classic(full_width = F, html_font = "Times")
+
+pp_df <- read_csv("~/Documents/projects/phase-1-studies/06-data/02-parsed/02-esm/wide_clean_data_W1_2025-01-09.csv")
+pp_df
+
+cpe_df <- read_csv("~/Downloads/wide_clean_data_W1_2024-11-25.csv") 
+
+date_iss <- cpe_df %>% filter(Day > 50) %>% select(SID) %>% distinct() %>% pull(SID)
+
+# some dates got transposed by excel -- fix it
+cpe_df <- cpe_df %>% 
+  filter(!SID %in% date_iss) %>% 
+  full_join(
+    cpe_df %>%  
+      filter(SID %in% date_iss & !grepl("-11 ", Date)) %>%
+      mutate_at(vars(StartDate), as.character) %>%
+      mutate_at(vars(StartDate), ydm_hms) %>%
+      full_join(
+        cpe_df %>% 
+          filter(SID %in% date_iss & grepl("-11 ", Date)) %>%
+          mutate_at(vars(Date, StartDate), as.character) %>%
+          mutate_at(vars(Date, StartDate), ydm_hms) 
+      ) %>%
+      arrange(SID, Date) %>%
+      group_by(SID) %>%
+      mutate(StartDate = min(Date)) %>%
+      mutate(Day = as.numeric(difftime(Date,StartDate), units = "days"))
+  )
+
+ema_cb <- cb %>% filter(level == "EMA" & category != "proc")
+
+ema_old <- ema_cb %>% pull(`Item #`)
+names(ema_old) <- ema_cb %>% pull(item_name)
+
+ema_df <- pp_df %>% 
+  select(
+    SID, Date, StartDate, Day, Hour, HourBlock
+    , all_of(ema_old)
+) %>%
+  mutate(sample = "pp") %>%
+  full_join(
+    cpe_df %>% 
+      select(
+        SID, Date, StartDate, Day, Hour, HourBlock
+        , all_of(ema_old)
+    ) %>%
+      mutate(sample = "cpe")
+  )
+
+write_csv(ema_df, sprintf("~/Downloads/erdyn-ema-%s.csv", Sys.Date()))
+```
+
+## Baseline Data
+
+```{r}
+subs <- read_csv("~/Documents/projects/phase-1-studies/06-data/02-parsed/subs.csv")
+pp_baseline_df <- read_csv("~/Documents/projects/phase-1-studies/06-data/01-raw/01-baseline/2023-02-27-baseline.csv") %>%
+  filter(!row_number() %in% 1:2) %>%
+  mutate(SID = mapvalues(id, subs$old, subs$new)) %>%
+  filter(Progress == 100 & Finished == 1) %>%
+  select(
+    SID, StartDate, race, race_6_TEXT, ethnicity
+    , gender, gender_TEXT = gender_3_TEXT, YOB
+    , starts_with("SWL")
+    , starts_with("CESD")
+    ) %>%
+  mutate(sample = "pp") %>%
+  mutate_at(vars(SID, gender, SWL_1:SWL_5, CESD01:CESD20), as.numeric) %>% 
+  filter(!is.na(SID))
+
+cpe_baseline_df <- read_csv("~/Downloads/Contextualizing Personal Experiences Pilot Baseline_Raw_11.25.24.csv") %>% 
+  filter(!row_number() %in% 1:2) %>%
+  filter(Progress == 100 & Finished == 1) %>%
+  select(
+    SID = id, StartDate, race, race_6_TEXT, ethnicity
+    , gender, gender_TEXT = gender_8_TEXT, YOB
+    , starts_with("SWL")
+    , starts_with("CESD")
+    ) %>% 
+  mutate(sample = "cpe"
+         , race = map_chr(strsplit(as.character(race), ""), ~paste(., collapse = ","))
+         , ethnicity = map_chr(strsplit(as.character(ethnicity), ""), ~paste(., collapse = ","))) %>% 
+  mutate(ethnicity = ifelse(ethnicity == "NA", NA, ethnicity)) %>%
+  mutate_at(vars(gender, SWL_1:SWL_5, CESD01:CESD20), as.numeric) %>% 
+  filter(!is.na(SID))
+
+baseline_df <- pp_baseline_df %>% full_join(cpe_baseline_df)
+
+baseline_df
+write_csv(baseline_df, sprintf("~/Downloads/erdyn-baseline-%s.csv", Sys.Date()))
+```

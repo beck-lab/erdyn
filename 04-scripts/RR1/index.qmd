@@ -1,0 +1,124 @@
+---
+title: "ER Dynamics"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Workspace
+
+## Packages
+
+```{r}
+library(psych)
+library(knitr)
+library(kableExtra)
+library(rstan)
+library(brms)
+library(broom.mixed)
+library(metafor)
+library(ctsem)
+library(ctsemOMX)
+library(tidybayes)
+library(furrr)
+library(patchwork)
+library(plyr)
+library(tidyverse)
+
+cb <- readxl::read_excel("../../02-data/00-codebooks/erdyn-codebook.xlsx", sheet = 1)
+
+neg_emo_items <- cb %>% 
+  filter(item == "Negative") %>% 
+  select(category = item, long_name) %>%
+  mutate(color = RColorBrewer::brewer.pal(9, "Reds")[5:8])
+pos_emo_items <- cb %>% 
+  filter(item == "Positive") %>% 
+  select(category = item, long_name) %>%
+  mutate(color = RColorBrewer::brewer.pal(9, "Blues")[5:8])
+
+emo_items <- tibble(
+  category = c("Positive", "Negative")
+  , long_name = c("Positive", "Negative")
+  , color = c("blue4", "red4")
+  ) %>%
+  full_join(neg_emo_items) %>%
+  full_join(pos_emo_items)
+
+cor_items <- cb %>% 
+  filter(category == "Correlates") %>%
+  select(old_name = item, long_name) %>%
+  distinct() %>%
+  mutate(group = ifelse(grepl("BFI", long_name), "BFI-2", "Well-Being")) %>%
+  full_join(
+    cb %>% 
+    filter(category == "emotion regulation strategies") %>%
+    select(old_name = item_name, long_name) %>%
+    mutate(
+      group = "ER"
+      , old_name = paste("avg", old_name, sep = "_")
+      ) 
+  ) %>%
+  full_join(
+    tibble(old_name = "er_strat_rep", long_name = "ER Strategy Repertoire", group = "ER")
+  )
+
+options(knitr.kable.NA = '')
+```
+
+```{r}
+my_theme <- function(){
+  theme_bw() + 
+  theme(
+    legend.position = "bottom"
+    , legend.title = element_text(face = "bold", size = rel(1))
+    , legend.text = element_text(face = "italic", size = rel(1))
+    , axis.text = element_text(face = "bold", size = rel(1.1), color = "black")
+    , axis.title = element_text(face = "bold", size = rel(1.2))
+    , plot.title = element_text(face = "bold", size = rel(1.2), hjust = .5)
+    , plot.subtitle = element_text(face = "italic", size = rel(1.2), hjust = .5)
+    , strip.text = element_text(face = "bold", size = rel(1.1), color = "white")
+    , strip.background = element_rect(fill = "black")
+    )
+}
+```
+
+```{r}
+cb %>% 
+  filter(level == "EMA") %>%
+  select(category, item, item_name, item_text, `Item #`) %>%
+  kable(.
+        , "html"
+        , col.names = c("Category", "Scale", "Item", "Item Text", "Item #")
+        , cap = "Preregistered EMA Variables"
+        ) %>%
+  kable_classic(full_width = F, html_font = "Times")
+```
+
+```{r}
+cb %>% 
+  filter(level == "Baseline") %>%
+  select(category, item, item_name, item_text, `Item #`) %>%
+  kable(.
+        , "html"
+        , col.names = c("Category", "Scale", "Item", "Item Text", "Item #")
+        , cap = "Preregistered EMA Variables"
+        ) %>%
+  kable_classic(full_width = F, html_font = "Times")
+```
+
+```{r}
+h_tab <- read_csv("../../05-results/tables/tab-1-hypotheses.csv") %>%
+  kable(
+    .
+    , "html"
+    , caption = "<strong>Table 1</strong><br><em>Summary of Hypotheses Tested</em>"
+    , align = c(rep("l", 3), rep("c", 5))
+  ) %>%
+  kable_classic(full_width = F, html_font = "Times") %>%
+  column_spec(5:9, background = c(rep("white", 4), rep("grey80", 3), "white", rep("grey80", 7), "white")) %>%
+  collapse_rows(1:2, "top") %>%
+  footnote("+ = hypothesized positive association, - = hypothesized negative association, / = no directional hypothesis")
+h_tab
+save_kable(h_tab, file = "../../05-results/tables/tab-1-hypotheses.html")
+```

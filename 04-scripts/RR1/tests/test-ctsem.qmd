@@ -1,0 +1,438 @@
+---
+title: "Testing ctsem"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+# remove(list = ls())
+library(rstan)
+library(ctsem)
+library(ctsemOMX)
+library(plyr)
+library(tidyverse)
+```
+
+```{r, eval = F}
+# load("~/Documents/projects/phase-1-studies/06-data/02-parsed/02-esm/all_clean_data_W1_2024-05-15.RData")
+# d <- dat_wide %>%
+#   filter(SID == "84417") %>%
+#   select(id = SID, Date, EM01, EM02) %>%
+#   mutate(time = difftime(Date, Date[1], unit = "mins")) %>%
+#   # mutate(time = as.numeric(difftime(Date - Date[1])/360)) %>%
+#   as.data.frame()
+# d
+# save(d, file = "~/Downloads/sample_dat.RData")
+```
+
+```{r}
+# load("/Users/rbat/Library/CloudStorage/Box-Box/Change as Outcome/sample_dat.RData")
+load("~/Downloads/sample_dat.RData")
+```
+
+
+## Basic Univariate Model Syntax 
+$$
+\begin{align}
+\frac{dx_{t}}{dt} \: &= \: \mu_x \: + \: \beta_x \cdot x_{t} 
+\end{align}
+$$
+
+```{r}
+d <- as.data.frame(d)
+tp <- nrow(d)
+# colnames(d)
+model_1 <- ctModel(
+  type = "stanct"
+  , manifestNames = c("EM01")
+  , latentNames   = c("X")
+  , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+  , DRIFT         = matrix(c("beta_x"), nrow = 1, byrow = T)
+  , CINT          = matrix(c("mu_x"), nrow = 1, byrow = T)
+  # , MANIFESTMEANS = matrix(c(0), nrow = 1)
+  # , MANIFESTVAR   = matrix(c(0), nrow = 1)
+  # , DIFFUSION     = matrix(c(0), nrow = 1, byrow = T)
+  , id            = "id"
+  , time          = "time"
+  # , Tpoints       = tp
+  )
+
+ctModelLatex(model_1)
+
+model1_fit <- ctStanFit(
+  data = d
+  , model_1
+  )
+summary(model1_fit)
+
+ctKalman(model1_fit, plot = T)
+p1 <- ctStanPostPredict(model1_fit, plot = F)
+pred1 <- p1[[1]][[3]]$data %>% filter(Source == "Observed")
+p1[[1]][[3]] + 
+  geom_hline(aes(yintercept = 0), linetype = "dashed") + 
+  geom_smooth(data = pred1, se = F, method = "lm", color = "blue") + 
+  labs(
+    title = "Sample Univariate Change as Outcome Model"
+    , subtitle = "Estimated via ctsem package"
+    ) + 
+  theme(plot.title = element_text(face = "bold", hjust = .5)
+        , plot.subtitle = element_text(face = "italic", hjust = .5)
+        , legend.position = "bottom")
+ggsave(file = "~/Downloads/univar-cao.png", width = 6, height = 4)
+test <- ctStanGenerateFromFit(model1_fit, fullposterior = TRUE, 
+      nsamples = 200)
+
+k1 <- ctKalman(model1_fit, removeObs = T)
+ctsem::plot.ctKalmanDF(k1)
+
+k1 %>% 
+  filter(Element %in% c("y", "yprior")) %>% 
+  select(Row, Element, Subject, Time, value) %>% 
+  pivot_wider(
+    names_from = "Element"
+    , values_from = "value"
+  ) %>% 
+  drop_na() %>%
+  ggplot(aes(x = y, y = yprior, color = Row, group = Row)) + 
+  geom_point()
+
+# ctPlot(model1_fit, types=c('regression','kalman','priorcheck'))
+                  
+```
+
+## Univariate Model Syntax (Main Effect of ER Goals)
+Main effect = change in strength and subtle changes in location 
+
+$$
+\begin{align}
+\frac{dx_{t}}{dt} \: &= \: \mu_x \: + \: \beta_x \cdot x_{t} \: + \: c_{x} \cdot y_{t}
+\end{align}
+$$
+
+```{r}
+center <- function(x) x - mean(x, na.rm = T)
+d <- as.data.frame(d) %>% 
+  mutate(EM02 = center(EM02))
+tp <- nrow(d)
+# colnames(d)
+model_2 <- ctModel(
+  type = "stanct"
+  , manifestNames = c("EM01")
+  , latentNames   = c("X")
+  , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+  , DRIFT         = matrix(c("beta_x"), nrow = 1, byrow = T)
+  , CINT          = matrix(c("mu_x"), nrow = 1, byrow = T)
+  , MANIFESTMEANS = matrix(c(0), nrow = 1)
+  , MANIFESTVAR   = matrix(c(0), nrow = 1)
+  # , DIFFUSION     = matrix(c(0, 0), nrow = 1, byrow = T)
+  , TDpredNames = c("EM02")
+  , id            = "id"
+  , time          = "time"
+  # , Tpoints       = tp
+  )
+
+# model_2 <- ctModel(
+#   type = "stanct"
+#   , manifestNames = c("EM01", "EM02")
+#   , latentNames   = c("X", "Y")
+#   , LAMBDA        = matrix(c(1, 0
+#                            , 0, 1), nrow = 2, byrow = T)
+#   , DRIFT         = matrix(c("beta_x", "c_x"
+#                              , "c_y", "beta_y"), nrow = 2, byrow = T)
+#   , CINT          = matrix(c("mu_x", "mu_y"), nrow = 2, byrow = T)
+#   , MANIFESTMEANS = matrix(c(0, 0), nrow = 2)
+#   , MANIFESTVAR   = matrix(c(0, 0, 0, 0), nrow = 2)
+#   , DIFFUSION     = matrix(c(1, 0,
+#                              0, 0), nrow = 2, byrow = T)
+#   , id            = "id"
+#   , time          = "time"
+#   , Tpoints       = tp
+  # )
+
+ctModelLatex(model_2)
+
+model2_fit <- ctStanFit(
+  data = d
+  , model_2
+  )
+
+summary(model2_fit)
+
+p2 <- ctStanPostPredict(model2_fit, plot = F)
+pred2 <- p2[[1]][[3]]$data %>% filter(Source == "Model")
+p2[[1]][[3]] + 
+  geom_hline(aes(yintercept = 0), linetype = "dashed") + 
+  geom_smooth(data = pred2, se = F, method = "lm", color = "blue") + 
+  labs(
+    title = "Sample Univariate Change as Outcome Model (Main Effect of Y)"
+    , subtitle = "Estimated via ctsem package"
+    ) + 
+  theme(plot.title = element_text(face = "bold", hjust = .5)
+        , plot.subtitle = element_text(face = "italic", hjust = .5))
+
+ctKalman(model2_fit, plot = T)
+k2 <- ctKalman(model2_fit, removeObs = T)
+
+k2 %>% 
+  filter(Element %in% c("y", "yprior")) %>% 
+  select(Row, Element, Subject, Time, value) %>% 
+  pivot_wider(
+    names_from = "Element"
+    , values_from = "value"
+  ) %>% 
+  drop_na() %>%
+  ggplot(aes(x = y, y = yprior, color = Row, group = Row)) + 
+  geom_point()
+
+# ctPlot(model2_fit, types=c('regression','kalman','priorcheck'))
+                  
+```
+
+## Univariate Model Syntax (Moderating Effect of ER Goals)
+Moderating effect = change in location as a function of Y
+
+$$
+\begin{align}
+\frac{dx_{t}}{dt} \: &= \: \mu_x \: + \: \beta_1 \cdot x_{t} \: + \: \beta_{2} \cdot y_{t} \: + \: \beta_{3} \cdot x_{t} \cdot y_{t}
+\end{align}
+$$
+
+```{r}
+d <- as.data.frame(d) %>% 
+  mutate(EM01xEM02 = EM01*EM02)
+tp <- nrow(d)
+# colnames(d)
+model_3 <- ctModel(
+  type = "stanct"
+  , manifestNames = c("EM01")
+  , latentNames   = c("X")
+  , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+  , DRIFT         = matrix(c("beta_x"), nrow = 1, byrow = T)
+  , CINT          = matrix(c("mu_x"), nrow = 1, byrow = T)
+  , MANIFESTMEANS = matrix(c(0), nrow = 1)
+  , MANIFESTVAR   = matrix(c(0), nrow = 1)
+  # , DIFFUSION     = matrix(c(0, 0), nrow = 1, byrow = T)
+  , TDpredNames = c("EM02", "EM01xEM02")
+  , id            = "id"
+  , time          = "time"
+  , Tpoints       = tp
+  )
+
+ctModelLatex(model_3)
+
+model3_fit <- ctStanFit(
+  data = d
+  , model_3
+  )
+
+summary(model3_fit)
+
+ctStanContinuousPars(model3_fit)
+
+p3 <- ctStanPostPredict(model3_fit, plot = F)
+pred3 <- p3[[1]][[3]]$data %>% filter(Source == "Observed")
+p3[[1]][[3]] + 
+  geom_hline(aes(yintercept = 0), linetype = "dashed") + 
+  geom_smooth(data = pred1, se = F, method = "lm") + 
+  labs(
+    title = "Sample Univariate Change as Outcome Model (Main Effect of Y)"
+    , subtitle = "Estimated via ctsem package"
+    ) + 
+  theme(plot.title = element_text(face = "bold", hjust = .5)
+        , plot.subtitle = element_text(face = "italic", hjust = .5))
+
+ctKalman(model2_fit, plot = T)
+k2 <- ctKalman(model2_fit, removeObs = T)
+
+k2 %>% 
+  filter(Element %in% c("y", "yprior")) %>% 
+  select(Row, Element, Subject, Time, value) %>% 
+  pivot_wider(
+    names_from = "Element"
+    , values_from = "value"
+  ) %>% 
+  drop_na() %>%
+  ggplot(aes(x = y, y = yprior, color = Row, group = Row)) + 
+  geom_point()
+
+# ctPlot(model2_fit, types=c('regression','kalman','priorcheck'))
+                  
+```
+
+## Bivariate Model Syntax 
+
+$$
+\begin{align}
+\frac{dx_{t}}{dt} \: &= \: \mu_x \: + \: \beta_x \cdot x_{t} \: + \: c_{x} \cdot y_{t} \\
+\frac{dy_{t}}{dt} \: &= \: \mu_y \: + \: \beta_y \cdot y_{t} \: + \: c_{y} \cdot x_{t}
+\end{align}
+$$
+
+```{r}
+d <- as.data.frame(d)
+tp <- nrow(d)
+# colnames(d)
+model_4 <- ctModel(
+  type = "stanct"
+  , manifestNames = c("EM01", "EM02")
+  , latentNames   = c("X", "Y")
+  , LAMBDA        = matrix(c(1, 0
+                           , 0, 1), nrow = 2, byrow = T)
+  , DRIFT         = matrix(c("beta_x", "c_x"
+                             , "c_y", "beta_y"), nrow = 2, byrow = T)
+  , CINT          = matrix(c("mu_x", "mu_y"), nrow = 2, byrow = T)
+  , MANIFESTMEANS = matrix(c(0, 0), nrow = 2)
+  , MANIFESTVAR   = matrix(c(0, 0, 0, 0), nrow = 2)
+  # , DIFFUSION     = matrix(c(0, 0, 0, 0), nrow = 2, byrow = T)
+  , id            = "id"
+  , time          = "time"
+  , Tpoints       = tp
+  )
+
+ctModelLatex(model_4)
+
+model4_fit <- ctStanFit(
+  data = d
+  , model_4
+  )
+summary(model4_fit)
+
+p4 <- ctStanPostPredict(model4_fit, plot = F)
+pred4 <- p4[[1]][[3]]$data %>%
+  mutate(var = "EM01") %>%
+  full_join(
+    p4[[2]][[3]]$data %>%
+    mutate(var = "EM02") 
+  ) %>%
+  group_by(var, Source) %>%
+  mutate(n = 1:n()) %>%
+  rename(d = y) %>%
+  pivot_wider(
+    names_from = "var"
+    , values_from = c("x", "d")
+  ) 
+
+pred4 %>%
+  filter(Source == "Model") %>%
+  ggplot(aes(x = x_EM01, y = x_EM02)) + 
+
+p4[[1]][[3]] + 
+  geom_hline(aes(yintercept = 0), linetype = "dashed") + 
+  geom_smooth(data = pred1, se = F, method = "lm") + 
+  labs(
+    title = "Sample Univariate Change as Outcome Model (Main Effect of Y)"
+    , subtitle = "Estimated via ctsem package"
+    ) + 
+  theme(plot.title = element_text(face = "bold", hjust = .5)
+        , plot.subtitle = element_text(face = "italic", hjust = .5))
+ctKalman(model4_fit, plot = T)
+
+k <- ctKalman(model4_fit, removeObs = T)
+
+k %>% 
+  filter(Element %in% c("y", "yprior")) %>% 
+  select(Row, Element, Subject, Time, value) %>% 
+  pivot_wider(
+    names_from = "Element"
+    , values_from = "value"
+  ) %>% 
+  drop_na() %>%
+  ggplot(aes(x = y, y = yprior, color = Row, group = Row)) + 
+  geom_point()
+
+ctPlot(model4_fit, types=c('regression','kalman','priorcheck'))
+                  
+```
+
+
+# Emorie's old code
+
+```{r}
+dwide <- ctLongToWide(d, id = "id", time = "time", manifestNames = "EM01")
+tp <- nrow(d)
+# dwideint <- ctIntervalise(dwide, tp, n.manifest = 1)
+
+model <- ctModel(
+  n.latent = 1
+  # , id = "id"
+  , time = "time"
+  , manifestNames = "Y1"
+  , n.manifest = 1
+  # , type = "stanct"
+  , Tpoints = tp
+  , LAMBDA = diag(1)
+  , T0VAR = "auto"
+  , T0MEANS = "auto"
+  , MANIFESTMEANS = "auto"
+  )
+# model$id <- "id"
+model$Tpoints <- tp
+# model$datawide <- dwide
+# model$T0VAR <- matrix(0)
+# model$T0MEANS <- matrix(1)
+
+smodel <- ctStanModel(model)
+
+
+model <- ctModel(
+  type='omx'
+  , Tpoints = tp
+  , n.latent=2
+  , n.manifest=1
+  , manifestNames='EM01'
+  , latentNames=c('EM01_level', 'EM01_velocity')
+  , LAMBDA=matrix(c( 1, 'ma1' ), nrow=1, ncol=2)
+  , DRIFT=matrix(c(0, 1,   'a21', 'a22'), nrow=2, ncol=2, byrow=TRUE)
+  , MANIFESTMEANS=matrix(c('m1'), nrow=1, ncol=1)
+  # , MANIFESTVAR=matrix(0, nrow=1, ncol=1)
+  , CINT=matrix(c(0, 0), nrow=2, ncol=1)
+  , DIFFUSION=matrix(c(0, 0,0, "diffusion"), ncol=2, nrow=2, byrow=TRUE)
+  )
+
+model <- ctModel(
+  type='omx'
+  , Tpoints = tp
+  , n.latent = 1
+  , n.manifest =1
+  , manifestNames='EM01'
+  , latentNames = 'EM01_level'
+  , LAMBDA = matrix(1)
+  , DRIFT = matrix(0)
+  , MANIFESTMEANS = matrix(c('m1'), nrow=1, ncol=1)
+  # , MANIFESTVAR=matrix(0, nrow=1, ncol=1)
+  , CINT = matrix(0)
+  , DIFFUSION = matrix(0)
+  )
+
+stanmodel <- ctStanModel(model)
+```
+
+## Run Model 
+
+```{r}
+fit <- ctStanFit(
+  datalong = d
+  , ctstanmodel = stanmodel
+  , objective = "Kalman"
+  , stationary = F
+  )
+```
+
+
+## Extract estimates 
+
+```{r}
+k <- ctKalman(fit)
+
+k %>% filter(Element == "etaprior")
+
+ctKalman(ctstantestfit, timerange=c(0,60))
+
+#Multiple subjects, y and yprior, showing plot arguments
+plot1<-ctKalman(fit, timerange=c(0,60), timestep=.1, plot=TRUE,
+  subjects=1, 
+  kalmanvec=c('y','yprior'),
+  errorvec=c(NA,'ypriorcov'))
+```
+
+

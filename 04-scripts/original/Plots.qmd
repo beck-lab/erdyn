@@ -1,0 +1,962 @@
+---
+title: "Plotting Interactions"
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load packages
+
+```{r}
+remove(list = ls())
+library(rstan)
+library(ctsem)
+library(tidyverse)
+library(tidybayes)
+```
+
+# Interaction Model
+
+```{r}
+load('/Users/rbat/Library/CloudStorage/GoogleDrive-rbat@ucdavis.edu/.shortcut-targets-by-id/1IBi35fWqR4ePptsFy5dr-oRy2oH__ek-/ER Dynamics Project/02-data/02-clean-data/rq2/nested_dat.RData')
+
+d2 <- nested_dat$data[[2]] %>% mutate(SID = 10497) %>%
+  mutate_at(vars(emo_value), lst(mean = mean), na.rm = T)
+d2 <- as.data.frame(d2) 
+
+model_3_trial <- ctModel(
+  type = "stanct"
+  , manifestNames = c("emo_value")
+  , latentNames   = c("E")
+  , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+  , DRIFT         = matrix(c("beta_E + beta_e3 * ergoal_value"), nrow = 1, byrow = T)
+  , CINT          = matrix(c("mu_E"), nrow = 1, byrow = T)
+  , MANIFESTMEANS = matrix(c(0), nrow = 1)
+  , MANIFESTVAR   = matrix(c(0), nrow = 1)
+  , T0MEANS       = matrix(c(3))
+  , DIFFUSION     = matrix(c("sigma_E"), nrow = 1, byrow = T)
+  , TDpredNames = c("ergoal_value")
+  , TDPREDEFFECT = matrix(c("beta_ER"))
+  # , n.TDpred  = 2
+  , id            = "SID"
+  , time          = "time"
+  , PARS = c("beta_E", "beta_e3")
+  # , Tpoints       = tp
+)
+ctModelLatex(model_3_trial)
+
+model_3_trial$pars$indvarying <- FALSE
+
+fit_mod <- ctStanFit(
+  data = d2
+  , model_3_trial
+)
+
+ctModelLatex(fit_mod)
+
+summary(fit_mod)$popmeans
+
+```
+
+# another dataset compiling
+
+```{r}
+d4 <- nested_dat$data[[2]] %>% mutate(SID = 12045) %>%
+  mutate_at(vars(emo_value), lst(mean = mean), na.rm = T)
+new_fit <- ctStanFitUpdate(fit_mod, data = d4, refit = T)
+summary(new_fit)$popmeans
+
+
+```
+
+
+# Plot Data
+
+## simple plot of phase space
+
+
+```{r}
+
+plot_phase_space <- function(data, fit_mod){
+  
+# Posterior Coefficient Data Frame
+
+pars <- data.frame(fit_mod$stanfit$transformedpars$popmeans) %>%
+  sample_n(500) %>%
+  set_names(c("sigma_E", "mu_E", "beta_ER", "beta_E", "beta_e3")) %>%
+  select(-sigma_E) %>%
+  select(beta_E, beta_ER, beta_e3, mu_E)
+
+# Predictor Data Frame
+
+obs_data <- crossing(
+  emo = seq(min(data$emo_value), max(data$emo_value), .1)
+  , er_goal = c(-5, -2.5, 0, 2.5, 2.5)
+  ) %>%
+  mutate(
+    inter_emo_erg = emo*er_goal,
+    intercept = 1
+    )
+
+n_obs <- length(obs_data$emo)
+
+# Changes Prediction
+
+dt_pred <- data.frame( as.matrix(pars) %*% as.matrix(t(obs_data)) ) 
+
+dt_pred <- dt_pred %>%
+  median_qi() %>%
+  select(-.width, -.point, -.interval) %>%
+  pivot_longer(
+    cols = everything(),
+    values_to = "change",
+    names_to = c("qi")
+    )
+
+plot_data <- data.frame(
+  "dt" = dt_pred$change
+  , "qi" = rep(c("M", "lower", "upper"), times = n_obs)
+  , "emo_value" = rep(obs_data$emo, each = 3)
+  , "er_goal" = rep(obs_data$er_goal, each = 3)
+  ) %>%
+  pivot_wider(
+    names_from = "qi"
+    , values_from = "dt"
+    )
+
+p <- ggplot(
+  plot_data
+  , aes(x = emo_value, y = M)
+  ) +
+    # geom_jitter(
+    #   width = 0.4
+    #   , height = 0.4
+    #   ) +
+    labs(
+      x = "E "
+      , y = "dE/dt"
+      ) +
+    theme_minimal() +
+    xlim(
+      min(data$emo_value)
+      , max(data$emo_value)
+      )
+
+return(p)
+}
+
+plot_phase_space(data = d2, fit_mod = fit_mod)
+plot_phase_space(data = x, fit_mod = fit)
+```
+
+
+## Prediction Plot of Changes with Respect to Goals
+
+### RQ1 
+
+```{r}
+rq1_pred_plot <- function(study, sid, emo_item, file){
+  
+}
+```
+
+
+### RQ2 Main Effect of Goals 
+
+```{r}
+rq2_main_pred_plot <- function(study, sid, emo_item, ergoal, file){
+  erg_long <- ifelse(ergoal == "goalNeg", "ER Goal: Negative Emotions", "ER Goal: Positive Emotions")
+  
+  load(sprintf("../05-results/RQ2-main/models/%s", file))
+  fit_mod <- fit
+  
+  load(sprintf("../02-data/02-clean-data/rq2/rdata/%s", file))
+  data <- x
+  
+  # Posterior Coefficient Data Frame
+  
+  pars <- data.frame(fit_mod$stanfit$transformedpars$popmeans) %>%
+    sample_n(500) 
+  
+  old <- paste0("X", 1:4); names(old) <- c("beta_E", "sigma_E", "mu_E", "beta_ER")
+  ord <- c("beta_E", "beta_ER", "mu_E")
+  
+  pars <- pars %>% 
+     select(all_of(old)) %>%
+     select(-sigma_E) %>%
+     select(all_of(ord))
+
+  obs_data <- crossing(
+    emo_value = mean(data$emo_value) #+ 3*sd(data$emo_value)
+    , intercept = 1
+    , er_goal = seq(min(data$ergoal_value), max(data$ergoal_value), .01)
+    ) %>%
+      select(emo_value, er_goal, intercept)
+  
+  n_obs <- length(obs_data$emo_value)
+  
+  # Changes Prediction
+  
+  dt_pred <- data.frame( as.matrix(pars) %*% as.matrix(t(obs_data))) 
+  
+  
+  raw_data <- x %>%
+    select(emo_value, ergoal_value) %>%
+    mutate(intercept = 1)
+  raw_pred <- data.frame( as.matrix(pars) %*% as.matrix(t(raw_data))) 
+  
+  raw_pred <- raw_pred %>%
+    median_qi() %>%
+    select(-.width, -.point, -.interval) %>%
+    pivot_longer(
+      cols = everything()
+      , values_to = "change",
+      , names_to = c("level", "term")
+      , names_sep = "[.]"
+      ) %>% 
+    mutate(term = ifelse(is.na(term), "M", term)) %>%
+    pivot_wider(
+      names_from = "term"
+      , values_from = "change"
+      )
+  
+  raw_data <- raw_data %>%
+    mutate(level = paste0("X", 1:n())) %>%
+    full_join(raw_pred) %>%
+    mutate(zone = case_when(
+      M < 0 & ergoal_value < 0 & upper < 0 & sign(upper) == sign(ergoal_value) ~ "Successful",# Goal-Directed Regulation",
+      M > 0 & ergoal_value > 0 & upper > 0 & sign(lower) == sign(ergoal_value) ~ "Successful",
+      ergoal_value == 0 & sign(lower) != sign(upper) ~ "Successful",
+      M < 0 & ergoal_value > 0 & upper < 0  ~ "Counterproductive",
+      M > 0 & ergoal_value < 0 & lower > 0  ~ "Counterproductive",
+      .default = "Unsuccessful"# Goal-Directed Regulation"
+    ))
+  
+  raw_perc <- raw_data %>% 
+    mutate(dir = sign(ergoal_value)) %>%
+    group_by(dir, zone) %>% 
+    tally() %>% 
+    ungroup() %>% 
+    mutate(n = n/sum(n)*100)
+  
+  dt_pred <- dt_pred %>%
+    median_qi() %>%
+    select(-.width, -.point, -.interval) %>%
+    pivot_longer(
+      cols = everything()
+      , values_to = "change",
+      , names_to = c("level", "term")
+      , names_sep = "[.]"
+      ) %>% 
+    mutate(term = ifelse(is.na(term), "M", term)) %>%
+    pivot_wider(
+      names_from = "term"
+      , values_from = "change"
+      )
+  
+  plot_data <- obs_data %>% 
+    mutate(level = paste0("X", 1:n())) %>%
+    full_join(dt_pred) %>%
+    mutate(zone = case_when(
+      M < 0 & er_goal < 0 & upper < 0 & sign(upper) == sign(er_goal) ~ "Successful",# Goal-Directed Regulation",
+      M > 0 & er_goal > 0 & upper > 0 & sign(lower) == sign(er_goal) ~ "Successful",
+      M < 0 & er_goal > 0 & upper < 0  ~ "Counterproductive",
+      M > 0 & er_goal < 0 & lower > 0  ~ "Counterproductive",
+      .default = "Unsuccessful"# Goal-Directed Regulation"
+    ))
+
+  perc_data <- plot_data %>% 
+    group_by(zone) %>% 
+    tally() %>% 
+    ungroup() %>% 
+    mutate(n = n/sum(n)*100)
+  save(raw_data, raw_perc, perc_data, file = sprintf("../05-results/RQ2-main/success/%s-%s-%s-%s.RData", study, sid, emo_item, ergoal))
+  
+  
+  zone_data <- plot_data %>%
+    arrange(desc(abs(M))) %>%
+    group_by(zone) %>%
+    slice_head(n = 1)
+  
+  plot_data %>% 
+    mutate(goal_dir = sign(er_goal)) %>%
+    group_by(zone, goal_dir) %>% 
+    tally() %>% 
+    mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+  
+  plot_data %>%
+    mutate(
+      zone_lag = lag(zone) == zone
+      , zone_lead = lead(zone) == zone
+    ) %>%
+    filter(is.na(zone_lag) | is.na(zone_lead) | zone_lag != zone_lead)
+  
+  xmini <- min(plot_data$er_goal)
+  ymini <- min(plot_data$lower)
+  ymaxi <- max(plot_data$upper)
+  if(abs(ymini) > abs(ymaxi)) ymaxi <- abs(ymini) else ymini <- -1*ymaxi
+    
+  subtl <- sprintf("%s: Goal-Change Associations", emo_item)
+    p <- ggplot(
+      plot_data
+      , aes(x = er_goal, y = M, fill = zone)
+      ) +
+      geom_hline(aes(yintercept = 0), linetype = "dashed", linewidth = 1) +
+      # geom_ribbon(
+      #   aes(y = M, ymin = lower, ymax = upper)
+      #   , alpha = 0.15
+      #   , fill = "#00BA38"
+      #   ) +
+      # geom_area(aes(fill = zone), alpha = .5, stat = "identity") +
+      # geom_ribbon(aes(ymin = 0, ymax = M, fill = factor(zone)), alpha = .5, stat = "identity") + 
+      # geom_area(data = plot_data %>% filter(zone == "Successful" & M > 0), fill = "#00BA38", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Successful" & M < 0),        aes(ymin = 0, ymax = M), fill = "#00BA38", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Successful" & M > 0),        aes(ymin = 0, ymax = M), fill = "#00BA38", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Unsuccessful" & M > 0),      aes(ymin = 0, ymax = M), fill = "goldenrod1", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Unsuccessful" & M < 0),      aes(ymin = 0, ymax = M), fill = "goldenrod1", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Counterproductive" & M > 0), aes(ymin = 0, ymax = M), fill = "red3", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Counterproductive" & M < 0), aes(ymin = 0, ymax = M), fill = "red3", alpha = .5) +
+      # geom_text(
+      #   data = zone_data
+      #   , aes(label = zone, y = M/4)
+      #   , hjust = "inward"
+      # ) + 
+      # scale_fill_manual(
+      #   values = c(
+      #     Successful = "#00BA38"
+      #     , Counterproductive = "red3"
+      #     , Unsuccessful = "goldenrod1"
+      #     )
+      #   ) +
+      geom_line(size = 1) + 
+      geom_line(
+        aes(y = lower), size = .25, linetype = "dashed"
+      ) + 
+      geom_line(
+        aes(y = upper), size = .25, linetype = "dashed"
+      ) + 
+      annotate(
+        "segment", arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1, x = xmini, xend = xmini, y = .25, yend = ymaxi
+        ) +
+      annotate(
+        "text", label = "Emotion is increasing"
+        , x = xmini-.25, y = .25, angle = 90, hjust = 0
+        ) +
+      annotate(
+        "segment", arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1 , x = xmini, xend = xmini, y = -.25, yend = ymini
+        ) +
+      annotate(
+        "text", label = "Emotion is decreasing"
+        , x = xmini-.25, y = -.25, angle = 90, hjust = 1
+        ) +
+      labs(
+        x = erg_long, y = "dE/dt"
+        , title = subtl
+        , subtitle = paste(str_to_upper(study), sid, sep = ": ")
+        , fill = "Emotion Regulation\nGoal Success"
+        ) +
+      my_theme() +
+      scale_x_continuous(limits = c(min(data$ergoal_value)-.25, max(data$ergoal_value)+.25)) +
+      ylim(ymini, ymaxi)
+    
+  filestr <- paste0(c(study, sid, emo_item, ergoal), collapse = "-")
+  ggsave(p, file = sprintf("../05-results/RQ2-main/plots/px-traj/%s.pdf", filestr), width = 8, height = 6)
+  ggsave(p, file = sprintf("../05-results/RQ2-main/plots/px-traj/png/%s.png", filestr), width = 8, height = 6)
+}
+```
+
+### RQ2 Interaction Effect 
+
+```{r}
+rq2_int_pred_plot <- function(study, sid, emo_item, ergoal, file){
+  erg_long <- ifelse(ergoal == "goalNeg", "ER Goal: Negative Emotions", "ER Goal: Positive Emotions")
+  
+  load(sprintf("../05-results/RQ2-int/models/%s", file))
+  fit_mod <- fit
+  
+  load(sprintf("../02-data/02-clean-data/rq2/rdata/%s", file))
+  data <- x
+  
+  # Posterior Coefficient Data Frame
+  
+  pars <- data.frame(fit_mod$stanfit$transformedpars$popmeans) %>%
+    sample_n(500) 
+  
+  old <- paste0("X", 1:5); names(old) <- c("sigma_E", "mu_E", "beta_ER", "beta_E", "beta_e3")
+  ord <- c("beta_E", "beta_ER", "beta_e3", "mu_E")
+  
+  pars <- pars %>% 
+     select(all_of(old)) %>%
+     select(-sigma_E) %>%
+     select(all_of(ord))
+
+  obs_data <- crossing(
+    emo_value = seq(min(data$emo_value), max(data$emo_value), .01)
+    , intercept = 1
+    , er_goal = c(-2.5, 0, 2.5)
+    ) %>%
+    mutate(inter_emo_erg = emo_value*er_goal) %>%
+    select(emo_value, er_goal, inter_emo_erg, intercept)
+  # if(sign(min(data$ergoal_value, na.rm = T)) >= 0) obs_data %>% filter(er_goal != -2.5)
+  # if(sign(max(data$ergoal_value, na.rm = T)) <= 0) obs_data %>% filter(er_goal != 2.5)
+  
+  n_obs <- length(obs_data$emo_value)
+  
+  # Changes Prediction
+  
+  dt_pred <- data.frame( as.matrix(pars) %*% as.matrix(t(obs_data))) 
+  
+  dt_pred <- dt_pred %>%
+    median_qi() %>%
+    select(-.width, -.point, -.interval) %>%
+    pivot_longer(
+      cols = everything()
+      , values_to = "change",
+      , names_to = c("level", "term")
+      , names_sep = "[.]"
+      ) %>% 
+    mutate(term = ifelse(is.na(term), "M", term)) %>%
+    pivot_wider(
+      names_from = "term"
+      , values_from = "change"
+      )
+  
+  raw_data <- x %>%
+    select(emo_value, ergoal_value) %>%
+    mutate(inter_emo_erg = emo_value*ergoal_value, intercept = 1)
+  raw_pred <- data.frame( as.matrix(pars) %*% as.matrix(t(raw_data))) 
+  
+  raw_pred <- raw_pred %>%
+    median_qi() %>%
+    select(-.width, -.point, -.interval) %>%
+    pivot_longer(
+      cols = everything()
+      , values_to = "change",
+      , names_to = c("level", "term")
+      , names_sep = "[.]"
+      ) %>% 
+    mutate(term = ifelse(is.na(term), "M", term)) %>%
+    pivot_wider(
+      names_from = "term"
+      , values_from = "change"
+      )
+  
+  raw_data <- raw_data %>%
+    mutate(level = paste0("X", 1:n())) %>%
+    full_join(raw_pred) %>%
+    mutate(zone = case_when(
+      M < 0 & ergoal_value < 0 & upper < 0 & sign(upper) == sign(ergoal_value) ~ "Successful",# Goal-Directed Regulation",
+      M > 0 & ergoal_value > 0 & upper > 0 & sign(lower) == sign(ergoal_value) ~ "Successful",
+      ergoal_value == 0 & sign(lower) != sign(upper) ~ "Successful",
+      M < 0 & ergoal_value > 0 & upper < 0  ~ "Counterproductive",
+      M > 0 & ergoal_value < 0 & lower > 0  ~ "Counterproductive",
+      .default = "Unsuccessful"# Goal-Directed Regulation"
+    ))
+  
+  raw_perc <- raw_data %>% 
+    mutate(dir = sign(ergoal_value)) %>%
+    group_by(dir, zone) %>% 
+    tally() %>% 
+    ungroup() %>% 
+    mutate(n = n/sum(n)*100)
+  
+  plot_data <- obs_data %>% 
+    mutate(level = paste0("X", 1:n())) %>%
+    full_join(dt_pred) %>%
+    mutate(zone = case_when(
+      M < 0 & er_goal < 0 & upper < 0 & sign(upper) == sign(er_goal) ~ "Successful",# Goal-Directed Regulation",
+      M > 0 & er_goal > 0 & upper > 0 & sign(lower) == sign(er_goal) ~ "Successful",
+      er_goal == 0 & sign(lower) != sign(upper) ~ "Successful",
+      M < 0 & er_goal > 0 & upper < 0  ~ "Counterproductive",
+      M > 0 & er_goal < 0 & lower > 0  ~ "Counterproductive",
+      .default = "Unsuccessful"# Goal-Directed Regulation"
+    ))
+  
+  perc_data <- 
+    plot_data %>% 
+    group_by(er_goal, zone) %>% 
+    tally() %>% 
+    ungroup() %>% 
+    mutate(n = n/sum(n)*100)
+  save(raw_data, raw_perc, perc_data, file = sprintf("../05-results/RQ2-int/success/%s-%s-%s-%s.RData", study, sid, emo_item, ergoal))
+  
+  zone_data <- plot_data %>%
+    arrange(desc(abs(M))) %>%
+    group_by(zone) %>%
+    slice_head(n = 1)
+  # 
+  # plot_data %>% 
+  #   mutate(goal_dir = sign(er_goal)) %>%
+  #   group_by(zone, goal_dir) %>% 
+  #   tally() %>% 
+  #   mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+  # 
+  # plot_data %>%
+  #   mutate(
+  #     zone_lag = lag(zone) == zone
+  #     , zone_lead = lead(zone) == zone
+  #   ) %>%
+  #   filter(is.na(zone_lag) | is.na(zone_lead) | zone_lag != zone_lead)
+  # 
+  xmini <- min(plot_data$er_goal)
+  ymini <- min(plot_data$lower)
+  ymaxi <- max(plot_data$upper)
+  if(abs(ymini) > abs(ymaxi)) ymaxi <- abs(ymini) else ymini <- -1*ymaxi
+    
+  subtl <- sprintf("%s x %s Interaction", emo_item, erg_long)
+    p <- ggplot(
+      plot_data
+      , aes(x = emo_value, y = M, fill = zone)
+      ) +
+      geom_hline(aes(yintercept = 0), linetype = "dashed", linewidth = 1) +
+      geom_point(
+        data = raw_data
+        ) + 
+      # geom_ribbon(
+      #   aes(y = M, ymin = lower, ymax = upper)
+      #   , alpha = 0.15
+      #   , fill = "#00BA38"
+      #   ) +
+      # geom_area(aes(fill = zone), alpha = .5, stat = "identity") +
+      # geom_ribbon(aes(ymin = 0, ymax = M, fill = factor(zone)), alpha = .5, stat = "identity") + 
+      # geom_area(data = plot_data %>% filter(zone == "Successful" & M > 0), fill = "#00BA38", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Successful" & M < 0),        aes(ymin = 0, ymax = M), fill = "#00BA38", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Successful" & M > 0),        aes(ymin = 0, ymax = M), fill = "#00BA38", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Unsuccessful" & M > 0),      aes(ymin = 0, ymax = M), fill = "goldenrod1", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Unsuccessful" & M < 0),      aes(ymin = 0, ymax = M), fill = "goldenrod1", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Counterproductive" & M > 0), aes(ymin = 0, ymax = M), fill = "red3", alpha = .5) +
+      geom_ribbon(data = plot_data %>% filter(zone == "Counterproductive" & M < 0), aes(ymin = 0, ymax = M), fill = "red3", alpha = .5) +
+      # geom_text(
+      #   data = zone_data
+      #   , aes(label = zone, y = M/4)
+      #   , hjust = "inward"
+      # ) + 
+      # scale_fill_manual(
+      #   values = c(
+      #     Successful = "#00BA38"
+      #     , Counterproductive = "red3"
+      #     , Unsuccessful = "goldenrod1"
+      #     )
+      #   ) +
+      geom_line(size = 1) + 
+      geom_line(
+        aes(y = lower), size = .25, linetype = "dashed"
+      ) + 
+      geom_line(
+        aes(y = upper), size = .25, linetype = "dashed"
+      ) + 
+      annotate(
+        "segment", arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1, x = xmini, xend = xmini, y = .25, yend = ymaxi
+        ) +
+      annotate(
+        "text", label = "Emotion is increasing"
+        , x = xmini-.25, y = .25, angle = 90, hjust = 0
+        ) +
+      annotate(
+        "segment", arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1 , x = xmini, xend = xmini, y = -.25, yend = ymini
+        ) +
+      annotate(
+        "text", label = "Emotion is decreasing"
+        , x = xmini-.25, y = -.25, angle = 90, hjust = 1
+        ) +
+      labs(
+        x = emo_item
+        , y = "dE/dt"
+        , title = subtl
+        , subtitle = paste(str_to_upper(study), sid, sep = ": ")
+        , fill = "Emotion Regulation\nGoal Success"
+        ) +
+      facet_grid(~er_goal) + 
+      my_theme() +
+      scale_x_continuous(limits = c(min(data$emo_value)-.25, max(data$emo_value)+.25)) +
+      ylim(ymini, ymaxi)
+    
+  filestr <- paste0(c(study, sid, emo_item, ergoal), collapse = "-")
+  ggsave(p, file = sprintf("../05-results/RQ2-int/plots/px-traj/%s.pdf", filestr), width = 10, height = 6)
+  ggsave(p, file = sprintf("../05-results/RQ2-int/plots/px-traj/png/%s.png", filestr), width = 10, height = 6)
+}
+```
+
+
+
+```{r}
+
+#load("fit_mod.RData")
+
+plot_precited_with_goals <- function(rq, study, sid, emo_item, ergoal, file){
+  
+  if(is.na(ergoal)) ergoal <- NULL
+  erg_long <- ifelse(ergoal == "goalNeg", "ER Goal: Negative Emotions", "ER Goal: Positive Emotions")
+  # function(data, fit_mod, erg){
+  
+  load(sprintf("../05-results/%s/models/%s", rq, file))
+  fit_mod <- fit
+  
+  rqd <- if(rq != "RQ1") "rq2" else "rq1"
+  load(sprintf("../02-data/02-clean-data/%s/rdata/%s", rqd, file))
+  data <- x
+  
+  # Posterior Coefficient Data Frame
+  
+  pars <- data.frame(fit_mod$stanfit$transformedpars$popmeans) %>%
+    sample_n(500) 
+  
+  if(rq == "RQ2-int"){
+    old <- paste0("X", 1:5); names(old) <- c("sigma_E", "mu_E", "beta_ER", "beta_E", "beta_e3")
+    ord <- c("beta_E", "beta_ER", "beta_e3", "mu_E")
+  } else if(rq == "RQ2-main"){
+    old <- paste0("X", 1:4); names(old) <- c("beta_E", "sigma_E", "mu_E", "beta_ER")
+    ord <- c("beta_E", "beta_ER", "mu_E")
+  } else{
+    old <- paste0("X", 1:3); names(old) <- c("beta_E", "sigma_E", "mu_E")
+    ord <- c("beta_E", "mu_E")
+  }
+    pars <- pars %>% 
+      select(all_of(old)) %>%
+      select(-sigma_E) %>%
+      select(all_of(ord))
+  
+  # Predictor Data Frame
+  
+  obs_data <- tibble(
+    emo_value = seq(min(data$emo_value), max(data$emo_value), .1)
+    , intercept = 1
+    )
+  
+  if(rq == "RQ2-main"){
+    obs_data <- crossing(obs_data, er_goal = 0) %>%
+      select(emo_value, er_goal, intercept)
+  } 
+  if(rq == "RQ2-int"){
+    obs_data <- crossing(obs_data, er_goal = c(-2.5, 0, 2.5)) %>%
+      mutate(inter_emo_erg = emo_value*er_goal) %>%
+      select(emo_value, er_goal, inter_emo_erg, intercept)
+  }
+  
+  # obs_data <- crossing(
+  #   emo_value = seq(min(data$emo_value), max(data$emo_value), .1)
+  #   , er_goal = c(-2.5, 0, 2.5)
+  #   ) %>%
+  #   mutate(
+  #     inter_emo_erg = emo_value*er_goal
+  #     , intercept = 1
+  #     )
+  # 
+  n_obs <- length(obs_data$emo_value)
+  
+  # Changes Prediction
+  
+  dt_pred <- data.frame( as.matrix(pars) %*% as.matrix(t(obs_data)) ) 
+  
+  dt_pred <- dt_pred %>%
+    median_qi() %>%
+    select(-.width, -.point, -.interval) %>%
+    pivot_longer(
+      cols = everything()
+      , values_to = "change",
+      , names_to = c("level", "term")
+      , names_sep = "[.]"
+      ) %>% 
+    mutate(term = ifelse(is.na(term), "M", term)) %>%
+    pivot_wider(
+      names_from = "term"
+      , values_from = "change"
+      )
+  
+  plot_data <- obs_data %>% 
+    mutate(level = paste0("X", 1:n())) %>%
+    full_join(dt_pred) 
+  if(rq == "RQ2-int"){
+    plot_data <- plot_data %>%
+      mutate(er_goal_fac = factor(er_goal, c(-2.5, 0, 2.5), c("Decrease a little", "Maintain", "Increase a little")))
+  }
+  
+  # plot_data <- 
+  #   data.frame(
+  #     "dt" = dt_pred$change
+  #     , "qi" = rep(c("M", "lower", "upper"), times = n_obs)
+  #     , "emo_value" = rep(obs_data$emo, each = 3)
+  #     , "er_goal" = rep(obs_data$er_goal, each = 3)
+  #     ) %>%
+  #   pivot_wider(
+  #     names_from = "qi"
+  #     , values_from = "dt"
+  #     )
+  
+  # plot_data <- plot_data %>% filter(er_goal %in% erg)
+    xmini <- min(plot_data$emo_value)
+    ymini <- min(plot_data$lower)
+    ymaxi <- max(plot_data$upper)
+    if(abs(ymini) > abs(ymaxi)) ymaxi <- abs(ymini) else ymini <- -1*ymaxi
+  if(rq == "RQ2-int"){
+    p <- ggplot(
+      plot_data
+      , aes(x = emo_value, y = M, group = er_goal_fac)
+      ) +
+      geom_hline(aes(yintercept = 0), linetype = "dashed", linewidth = 1) +
+      geom_ribbon(
+        aes(y = M, ymin = lower, ymax = upper, fill = er_goal_fac)
+        , alpha = 0.15
+        ) +
+      geom_line(
+        aes(color = er_goal_fac)
+        , size = 1
+      ) + 
+      annotate(
+        "segment"
+        , arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1
+        , x = xmini, xend = xmini
+        , y = .25, yend = ymaxi
+        ) +
+      annotate(
+        "text"
+        , label = "Emotion is increasing"
+        , x = xmini-.25
+        , y = .25
+        , angle = 90
+        , hjust = 0
+        ) +
+      annotate(
+        "segment"
+        , arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1
+        , x = xmini, xend = xmini
+        , y = -.25, yend = ymini
+        ) +
+      annotate(
+        "text"
+        , label = "Emotion is decreasing"
+        , x = xmini-.25
+        , y = -.25
+        , angle = 90
+        , hjust = 1
+        ) +
+      # geom_jitter(
+      #   aes(color = er_goal_fac)
+      #   , width = 0.3
+      #   , height = 0.3
+      #   ) +
+      labs(
+        x = emo_item
+        , y = "dE/dt"
+        , color = erg_long
+        , fill = erg_long
+        , title = "ER Goal x Emotion Interaction"
+        , subtitle = paste(str_to_upper(study), sid, sep = ": ")
+        ) +
+      guides(
+        color = guide_legend(direction = "horizontal")
+      ) + 
+      my_theme() +
+      xlim(min(data$emo_value)-.25, max(data$emo_value)) + 
+      ylim(ymini, ymaxi)
+  } else {
+    subtl <- if(rq == "RQ1") "Simple Emotion System" else "Emotion System, Adjusted for Goal"
+    # if(rq == "RQ2-main") {
+    #   plot_data <- plot_data %>%
+    #     mutate(zone = case_when(
+    #       ergoal == "goalNeg" & emo_item %in% c("Negative") & M < 0 ~ "yes", 
+    #       ergoal == "goalPos" & emo_item %in% c("Positive") & M > 0 ~ "yes"
+    #       ))
+    # }
+    p <- ggplot(
+      plot_data
+      , aes(x = emo_value, y = M)
+      ) +
+      geom_hline(aes(yintercept = 0), linetype = "dashed", linewidth = 1) +
+      geom_ribbon(
+        aes(y = M, ymin = lower, ymax = upper)
+        , alpha = 0.15
+        , fill = "#00BA38"
+        ) +
+      # geom_area(fill = "lightyellow") +
+      geom_line(
+        # color = "#00BA38"
+        , size = 1
+      ) + 
+      geom_line(
+        aes(y = lower)
+        # , color = "#00BA38"
+        , size = .25
+        , linetype = "dashed"
+      ) + 
+      geom_line(
+        aes(y = upper)
+        # , color = "#00BA38"
+        , size = .25
+        , linetype = "dashed"
+      ) + 
+      annotate(
+        "segment"
+        , arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1
+        , x = xmini, xend = xmini
+        , y = .25, yend = ymaxi
+        ) +
+      annotate(
+        "text"
+        , label = "Emotion is increasing"
+        , x = xmini-.25
+        , y = .25
+        , angle = 90
+        , hjust = 0
+        ) +
+      annotate(
+        "segment"
+        , arrow = arrow(type = "closed", length=unit(2, "mm"))
+        , size = 1
+        , x = xmini, xend = xmini
+        , y = -.25, yend = ymini
+        ) +
+      annotate(
+        "text"
+        , label = "Emotion is decreasing"
+        , x = xmini-.25
+        , y = -.25
+        , angle = 90
+        , hjust = 1
+        ) +
+      # geom_jitter(
+      #   aes(color = er_goal_fac)
+      #   , width = 0.3
+      #   , height = 0.3
+      #   ) +
+      labs(
+        x = emo_item
+        , y = "dE/dt"
+        , title = subtl
+        , subtitle = paste(str_to_upper(study), sid, sep = ": ")
+        ) +
+      my_theme() +
+      xlim(min(data$emo_value)-.25, max(data$emo_value)) + 
+      ylim(ymini, ymaxi)
+  }
+  filestr <- paste0(c(study, sid, emo_item, ergoal), collapse = "-")
+  ggsave(p, file = sprintf("../05-results/%s/plots/px-traj/%s.pdf", rq, filestr), width = 8, height = 6)
+  ggsave(p, file = sprintf("../05-results/%s/plots/px-traj/png/%s.png", rq, filestr), width = 8, height = 6)
+  
+  return(T)
+}
+
+plot_precited_with_goals(data = x, fit_mod = fit, erg = c(-2.5))
+
+plan(multisession(workers = 12L))
+nested_plots <- tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/models", .)))) %>%
+  unnest(file) %>%
+  separate(file, c("study", "SID", "emo_item", "ergoal"), sep = "-", remove = F) %>%
+  mutate_at(vars(emo_item, ergoal), ~str_remove_all(., ".RData")) %>%
+  anti_join(issues_nested %>% select(model:ergoal) %>% distinct())
+
+nested_plots <- nested_plots %>%
+  # filter(model == "RQ2-main") %>%
+  mutate(p = 
+    future_pmap(
+    # pmap(
+    list(model, study, SID, emo_item, ergoal, file)
+    , possibly(plot_precited_with_goals, NA_real_)
+    , .progress = T
+    ))
+plan(sequential)
+
+plan(multisession(workers = 12L))
+nested_plots %>%
+  filter(model == "RQ2-main") %>%
+  filter((ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+         (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name))) %>%
+  # filter(SID == "17599") %>%
+  mutate(p = 
+    future_pmap(
+    # pmap(
+    list(study, SID, emo_item, ergoal, file)
+    , possibly(rq2_main_pred_plot, NA_real_)
+    , .progress = T
+    ))
+plan(sequential)
+closeAllConnections()
+
+plan(multisession(workers = 12L))
+nested_plots %>%
+  filter(model == "RQ2-int") %>%
+  filter((ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+         (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name))) %>%
+  # filter(SID == "17599") %>%
+  mutate(p = 
+    future_pmap(
+    # pmap(
+    list(study, SID, emo_item, ergoal, file)
+    , possibly(rq2_int_pred_plot, NA_real_)
+    # , rq2_int_pred_plot
+    , .progress = T
+    ))
+plan(sequential)
+closeAllConnections()
+```
+
+
+
+
+# Extra Code
+
+## plot of observed and predicted changes against emotion
+
+```{r}
+
+# plot
+
+obs_dt <- data.frame(
+  subject = fit_mod$standata$subject,
+  time    = fit_mod$standata$time,
+  emo_value = fit_mod$data$Y,
+  er_goal = fit_mod$data$tdpreds
+)
+
+Ygen <- ctStanGenerateFromFit(fit_mod,fullposterior=TRUE,nsamples=500)$generated$Y
+
+sim_median <- apply(Ygen, c(2, 3), median, na.rm = TRUE) # median across the 
+
+sim_df <- data.frame(
+  subject   = fit_mod$standata$subject,
+  time      = fit_mod$standata$time,
+  emo_value = sim_median[, 1] ,
+  er_goal = fit_mod$data$tdpreds
+)
+
+sim_df <- sim_df %>%
+  mutate("dif" = emo_value - lag(emo_value),
+         "time_dif" = time - lag(time),
+         "dydt" = dif / time_dif)
+
+obs_dt <- obs_dt %>%
+  mutate("dif" = emo_value - lag(emo_value),
+         "time_dif" = time - lag(time),
+         "dydt" = dif / time_dif)
+
+obs_dt$Source <- "Observed"
+sim_df$Source <- "Model"
+
+plot_df <- rbind(obs_dt, sim_df)
+
+plot_df <- plot_df %>%
+  mutate(inter = emo_value * er_goal)
+
+ggplot(plot_df, aes(x = emo_value, y = dydt, color = Source, shape = Source, fill = Source)) +
+  geom_jitter(aes(alpha = inter), width = 0.2, height = 0.2) +
+  scale_color_manual(values = c("Observed" = "blue", "Model" = "black")) +
+  scale_shape_manual(values = c("Observed" = 21, "Model" = 24)) +
+  scale_fill_manual(values = c("Observed" = "blue", "Model" = "black")) +
+  labs(x = "E ", 
+       y = "dE/dt") +
+  theme_minimal() +
+  xlim(2, 6)
+
+# add limits to X and Y
+# try to see if you can add density for the observed
+# make a plot for the interaction
+
+ggsave("trial.jpeg")
+```

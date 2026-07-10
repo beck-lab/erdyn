@@ -1,0 +1,13 @@
+name: erdyn
+title: erdyn
+username: masked-account
+account: masked-account
+server: shinyapps.io
+hostUrl: https://api.shinyapps.io/v1
+appId: 16245231
+bundleId: 12251107
+url: https://masked-account.shinyapps.io/erdyn/
+version: 1
+asMultiple: FALSE
+asStatic: FALSE
+ignoredFiles: svar_subs.RData

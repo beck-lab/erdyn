@@ -1,0 +1,375 @@
+---
+title: "ctsem Models"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Background
+
+## Research Question 1:
+
+$$
+\begin{align}
+\frac{dE_{t}}{dt} \: &= \: \mu_E \: + \: \beta_x \cdot E_{t} 
+\end{align}
+$$
+
+## Research Question 2 (Main Effect of ER Goals):
+
+$$
+\begin{align}
+\frac{dE_{t}}{dt} \: &= \: \mu_E \: + \: \beta_1 \cdot E_{t} \: + \: \beta_{2} \cdot ER_{t}
+\end{align}
+$$
+
+## Research Question 2 (Interaction between emotion levels and ER Goals):
+
+$$
+\begin{align}
+\frac{dE_{t}}{dt} \: &= \: \mu_E \: + \: \beta_1 \cdot E_{t} \: + \: \beta_{2} \cdot ER_{t} \: + \: \beta_{3} \cdot E_{t} \cdot ER_{t}
+\end{align}
+$$
+
+\$\$
+
+\$\$
+
+# Models
+
+## Multilevel Models
+
+```{r}
+# Load Data
+
+d %>% filter(0 %in% c(SID, p_value, s_value))
+remove(list = ls())
+
+load('/Users/rbat/Library/CloudStorage/GoogleDrive-rbat@ucdavis.edu/.shortcut-targets-by-id/1IBi35fWqR4ePptsFy5dr-oRy2oH__ek-/ER Dynamics Project/02-data/02-clean-data/rq2/nested_dat.RData')
+
+negative_data <- nested_dat %>%
+  filter(emo_item == "Negative", ergoal == "goalNeg") %>%
+  mutate(data = map(data, ~ select(.x, -SID))) %>%
+  unnest(data)
+
+small_data <- nested_dat %>%
+  filter(emo_item == "Negative", ergoal == "goalNeg") %>%
+  slice_sample(n = 30) %>%
+  mutate(data = map(data, ~ select(.x, -SID))) %>%
+  unnest(data)
+
+# running model 1 with individually varying
+
+model_2 <- ctModel(
+  type = "ct"
+  , manifestNames = c("emo_value")
+  , latentNames   = c("E")
+  , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+  , DRIFT         = matrix(c("beta_E"), nrow = 1, byrow = T)
+  , CINT          = matrix(c("mu_E"), nrow = 1, byrow = T)
+  , MANIFESTMEANS = matrix(c(0), nrow = 1)
+  , MANIFESTVAR   = matrix(c(0), nrow = 1)
+  #, T0MEANS       = matrix(c(d$mean[1]))
+  , DIFFUSION     = matrix(c("sigma_E"), nrow = 1, byrow = T)
+  , TDpredNames = c("ergoal_value")
+  , TDPREDEFFECT = matrix(c("beta_ER"))
+  , id            = "SID"
+  , time          = "time"
+  # , Tpoints       = tp
+)
+
+model_2$pars$indvarying[which(model_2$pars$param %in% c("beta_E","mu_E", "beta_ER"))] <- TRUE
+
+ctModelLatex(model_2)
+
+model2_fit <- ctStanFit(
+  data = negative_data
+  , model_2
+)
+
+summary(model2_fit)
+
+IVEs <- ctStanSubjectPars(model2_fit)
+hist(IVEs[,,"beta_E"])
+hist(IVEs[,,"beta_ER"])
+hist(IVEs[,,"mu_E"], breaks = 30)
+
+# Model 3 with individually varying
+
+model_3_trial <- ctModel(
+  type = "stanct"
+  , manifestNames = c("emo_value")
+  , n.manifest = 1
+  , n.latent = 1
+  , n.TDpred = 1
+  , latentNames   = c("E")
+  , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+  , DRIFT         = matrix(c("beta_E + beta_ExER * ergoal_value"), nrow = 1, byrow = T)
+  , CINT          = matrix(c("mu_E"), nrow = 1, byrow = T)
+  , MANIFESTMEANS = matrix(c(0), nrow = 1)
+  , MANIFESTVAR   = matrix(c(0), nrow = 1)
+  #, T0MEANS       = matrix(c(3))
+  , DIFFUSION     = matrix(c("sigma_E"), nrow = 1, byrow = T)
+  , TDpredNames = c("ergoal_value")
+  , TDPREDEFFECT = matrix(c("beta_ER"))
+  , id            = "SID"
+  , time          = "time"
+  , PARS = c("beta_E", "beta_ExER")
+)
+
+model_3_trial$pars$indvarying[which(model_3_trial$pars$param %in% c("beta_E","mu_E", "beta_ER", "beta_ExER"))] <- TRUE
+
+ctModelLatex(model_3_trial)
+
+model3_fit <- ctStanFit(
+  data = small_data
+  , model_3_trial
+)
+
+summary(model3_fit)
+
+
+IVEs <- ctStanSubjectPars(model3_fit)
+hist(IVEs[,,"beta_E"])
+hist(IVEs[,,"beta_ER"])
+hist(IVEs[,,"mu_E"])
+```
+
+## Model Function
+
+```{r}
+model_fun <- function(sid, sample, eitem, eritem, model, exc){
+  if(is.na(eritem)) eritem <- NULL
+  # load the data
+  dfile <- if(model == "RQ1") "rq1" else {"rq2"}
+  if(exc == "er") dfile <- paste0(dfile, "-robustness")
+  filestr <- paste0(c(sample, sid, eitem, eritem), collapse = "-")
+  load(
+    file = paste0(
+      "../../02-data/02-clean-data/"
+      , dfile
+      , "/rdata/"
+      , filestr
+      , ".RData"
+      )
+  )
+  
+  # set up model arguments for time-dependent predictors (RQ2)
+  tdpn <- tdpe <- NULL
+  if(model != "RQ1"){
+    tdpn <- if(model == "RQ2-main") c("ergoal_value") else c("ergoal_value", "ExER")
+    tdpe <- if(model == "RQ2-main") matrix(c("beta_ER"), nrow = 1, byrow = T) else matrix(c("beta_ER", "beta_ExER"), nrow = 1, byrow = T)
+  }
+  
+  # initial mean 
+  m_emo <- x %>% pull(emo_value) %>% mean(., na.rm = T)
+  if(model != "RQ2-int"){
+    m_ind <- mean(x$emo_value, na.rm = T)
+    cint_ind <- paste0("mu_E | 2.5*param+", m_ind)
+    m <- ctModel(
+      type = "stanct"
+      , manifestNames = c("emo_value")
+      , latentNames   = c("E")
+      , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+      , DRIFT         = matrix(c("beta_E"), nrow = 1, byrow = T)
+      , CINT          = matrix(c("mu_E"), nrow = 1, byrow = T)
+      , MANIFESTMEANS = matrix(c(0), nrow = 1)
+      , MANIFESTVAR   = matrix(c(0), nrow = 1)
+      , T0MEANS       = matrix(c(m_emo))
+      , DIFFUSION     = matrix(c("sigma_E | 2.5*param + 1.5"), nrow = 1, byrow = T) # innovation var/covar
+      , TDpredNames   = tdpn
+      , TDPREDEFFECT  = tdpe
+      , id            = "SID"
+      , time          = "time"
+    )
+    # ctModelLatex(m)
+    # run the model
+    m$pars$indvarying <- FALSE
+    fit <- ctStanFit(data = x, m, priors = T, optimize = F, cores = 2)
+  } else {
+    m_ind <- mean(x$emo_value, na.rm = T)
+    cint_ind <- paste0("mu_E | 2.5*param+", m_ind)
+    m <- ctModel(
+        type = "stanct"
+        , manifestNames = c("emo_value")
+        , latentNames   = c("E")
+        , LAMBDA        = matrix(c(1), nrow = 1, byrow = T)
+        , DRIFT         = matrix(c("beta_E + beta_ExER * ergoal_value"), nrow = 1, byrow = T)
+        , CINT          = matrix(c(cint_ind), nrow = 1, byrow = T)
+        , MANIFESTMEANS = matrix(c(0), nrow = 1)
+        , MANIFESTVAR   = matrix(c(0), nrow = 1)
+        , T0MEANS       = matrix(c(3))
+        , DIFFUSION     = matrix(c("sigma_E | 2.5*param + 1.5"), nrow = 1, byrow = T) # innovation var/covar
+        , TDpredNames = c("ergoal_value")
+        , TDPREDEFFECT = matrix(c("beta_ER"))
+        # , n.TDpred  = 2
+        , id            = "SID"
+        , time          = "time"
+        , PARS = c("beta_E", "beta_ExER")
+        # , Tpoints       = tp
+      )
+    m$pars$indvarying <- FALSE
+    fit <- ctStanFit(data = x, m, priors = T, optimize = F, cores = 2)
+  }
+  save(fit, file = sprintf("../../05-results/%s/models/%s-%s.RData", model, filestr, exc))
+  
+  # estimate attractor locations from posterior
+  sum_fun <- function(x){
+    inter <- quantile(x, probs = c(.025, .5, .975))
+    tibble(
+      # parameter = "location"
+       mean = mean(x)
+      , sd = sd(x)
+      , lower = inter[1]
+      , mid = inter[2]
+      , upper = inter[3]
+      )
+  }
+  
+  samples <- ctExtract(fit)$popmeans
+  colnames(samples) <- rownames(summary(fit)$popmeans)
+  loc <- sum_fun(-1*samples[,"mu_E"]/samples[,"beta_E"])
+  
+  # save key params
+  fx <- if(model != "RQ2-int"){
+      summary(fit)$popmeans %>%
+      data.frame() %>%
+      setNames(c("mean", "sd", "lower", "mid", "upper", "neff", "rhat")) %>%
+      select(-neff, -rhat) %>%
+      rownames_to_column("parameter") %>%
+      full_join(loc %>% mutate(parameter = "location"))
+  } else {
+    samples %>%
+    data.frame() %>%
+    mutate(
+      location_decrease = (-1*mu_E + 2.5*beta_ER)/(beta_E - 2.5*beta_ExER)
+      , location_maintain = -1*mu_E/beta_E
+      , location_increase = (-1*mu_E - 2.5*beta_ER)/(beta_E + 2.5*beta_ExER)
+      , strength_decrease = beta_E-2.5*beta_ExER
+      , strength_maintain = beta_E
+      , strength_increase = beta_E+2.5*beta_ExER
+    ) %>%
+    sapply(., sum_fun) %>%
+    t() %>%
+    data.frame() %>%
+    rownames_to_column("parameter")
+  }
+  save(fx, file = sprintf("../../05-results/%s/fx/%s-%s.RData", model, filestr, exc))
+}
+```
+
+## Run Models
+
+```{r, eval = F}
+plan(multisession(workers = 5L))
+tibble(file = list.files("../../02-data/02-clean-data/rq1/rdata/")) %>%
+  separate(file, c("sample", "SID", "emo_item"), sep = "-") %>%
+  mutate(
+    emo_item = str_remove_all(emo_item, ".RData")
+    , model = "RQ1"
+    ) %>%
+  full_join(
+    tibble(file = list.files("../../02-data/02-clean-data/rq2/rdata/")) %>%
+      separate(file, c("sample", "SID", "emo_item", "ergoal"), sep = "-") %>%
+      mutate(ergoal = str_remove_all(ergoal, ".RData")) %>%
+      crossing(tibble(model = c("RQ2-main", "RQ2-int"))) %>%
+      filter((ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+             (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name)))
+  ) %>%
+    mutate(er_exc = "all") %>%
+  full_join(
+    tibble(file = list.files("../../02-data/02-clean-data/rq1-robustness/rdata/")) %>%
+    separate(file, c("sample", "SID", "emo_item"), sep = "-") %>%
+    mutate(
+      emo_item = str_remove_all(emo_item, ".RData")
+      , model = "RQ1"
+      ) %>%
+    full_join(
+      tibble(file = list.files("../../02-data/02-clean-data/rq2-robustness/rdata/")) %>%
+        separate(file, c("sample", "SID", "emo_item", "ergoal"), sep = "-") %>%
+        mutate(ergoal = str_remove_all(ergoal, ".RData")) %>%
+        crossing(tibble(model = c("RQ2-main", "RQ2-int"))) %>%
+        filter((ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+               (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name)))
+    ) %>%
+    mutate(er_exc = "er")
+  ) %>%
+  # filter(er_exc == "er") %>%
+  
+  # anti_join(
+  #   tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  #     mutate(file = map(model, ~list.files(sprintf("../../05-results/%s/models", .)))) %>%
+  #     unnest(file) %>%
+  #     separate(file, c("study", "SID", "emo_item", "ergoal"), sep = "-") %>%
+  #     mutate_at(vars(ergoal, emo_item), ~str_remove_all(., ".RData"))
+  # ) %>%
+  mutate(run = 
+           future_pmap(
+          # pmap(
+            list(SID, sample, emo_item, ergoal, model, er_exc)
+            , possibly(model_fun, NA_real_)
+            # , model_fun
+            , .progress = T
+  ))
+ plan(sequential)
+```
+
+```{r}
+plan(multisession(workers = 10L))
+run_fx <- function(model, filestr){
+  load(sprintf("../../05-results/%s/models/%s", model, filestr))
+  
+  # estimate attractor locations from posterior
+  sum_fun <- function(x){
+    x[is.nan(x)] <- NA
+    inter <- quantile(x, probs = c(.025, .5, .975), na.rm = T)
+    tibble(
+      # parameter = "location"
+       mean = mean(x, na.rm = T)
+      , sd = sd(x, na.rm = T)
+      , lower = inter[1]
+      , mid = inter[2]
+      , upper = inter[3]
+      )
+  }
+  
+  samples <- ctExtract(fit)$popmeans
+  colnames(samples) <- rownames(summary(fit)$popmeans)
+  loc <- sum_fun(-1*samples[,"mu_E"]/samples[,"beta_E"])
+  
+  # save key params
+  fx <- if(model != "RQ2-int"){
+      summary(fit)$popmeans %>%
+      data.frame() %>%
+      setNames(c("mean", "sd", "lower", "mid", "upper", "neff", "rhat")) %>%
+      select(-neff, -rhat) %>%
+      rownames_to_column("parameter") %>%
+      full_join(loc %>% mutate(parameter = "location"))
+  } else {
+    samples %>%
+    data.frame() %>%
+    mutate(
+      location_decrease = (-1*mu_E + 2.5*beta_ER)/(beta_E - 2.5*beta_ExER)
+      , location_maintain = -1*mu_E/beta_E
+      , location_increase = (-1*mu_E - 2.5*beta_ER)/(beta_E + 2.5*beta_ExER)
+      , strength_decrease = beta_E-2.5*beta_ExER
+      , strength_maintain = beta_E
+      , strength_increase = beta_E+2.5*beta_ExER
+    ) %>%
+    sapply(., sum_fun) %>%
+    t() %>%
+    data.frame() %>%
+    rownames_to_column("parameter")
+  }
+  save(fx, file = sprintf("../../05-results/%s/fx/%s", model, filestr))
+}
+plan(multisession(workers = 8L))
+test <- tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../../05-results/%s/models", .)))) %>%
+  unnest(file) %>%
+  mutate(fx = future_map2(model, file, possibly(run_fx, NA_real_), .progress = T))
+test %>%
+  filter(is.na(fx)) %>%
+  mutate(fx = map2(model, file, run_fx))
+```

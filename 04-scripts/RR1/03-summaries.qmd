@@ -1,0 +1,2030 @@
+---
+title: "ctsem Models"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+# Load in Model Summaries
+
+```{r}
+loadRData <- function(file, obj, rq){
+  file <- sprintf("../05-results/%s/fx/%s", rq, file)
+  load(file)
+  get(ls()[grepl(obj, ls())])
+}
+
+nested_sum <- tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/fx", .)))) %>%
+  unnest(file) %>%
+  mutate(
+    fx = pmap(list(file, "fx", model), loadRData)
+    , fx = map(fx, unnest)
+    ) %>%
+  separate(file, c("study", "SID", "emo_item", "ergoal"), sep = "-") %>%
+  mutate_at(vars(emo_item, ergoal), ~str_remove_all(., ".RData")) 
+
+# exclude for the person
+# some sort of group_by and filter(any())
+summ_df <- nested_sum %>% 
+  unnest(fx) %>% 
+  group_by(model, study, SID, emo_item, ergoal) %>%
+  mutate(flag = ifelse(
+    (model == "RQ1" & grepl("beta_E", parameter) & sign(mean) == 1) |
+    (grepl("mu", parameter) & (mean > 10 | mean < 0)) |
+    ((grepl("beta", parameter) | grepl("mu_", parameter)) & (sd > 10 | sd == 0))
+    , "implausible", "plausible")) %>%
+  filter(all(flag == "plausible")) %>%
+  ungroup()
+
+## counts across exclusion criteria and emotions
+summ_df %>% 
+  group_by(model, emo_item, ergoal, SID) %>%
+  slice_head(n = 1) %>%
+  group_by(model, emo_item, ergoal) %>%
+  tally() %>% 
+  pivot_wider(
+    names_from = "emo_item"
+    , values_from = "n"
+  )
+```
+
+# Meta-Analytic Summaries
+
+```{r}
+ma_fun <- function(d, mod, emo, er, param){
+  load("../05-results/ma-sample-mod.RData")
+  # m <- brm(
+  #   mean | se(sd) ~ 1 + (1 | SID),
+  #   , data = d
+  #   , prior = 
+  #     c(prior(exponential(1), class = sd))
+  #   , iter = 3000
+  #   , warmup = 1000
+  #   , cores = 4
+  #   , chains = 4
+  #   , seed = 15
+  #   )
+  m <- update(
+    m
+    , newdata = d
+    , iter = 3000
+    , warmup = 1000
+    , cores = 4
+    , seed = 15
+    , init = 0
+  )
+  save(m, file = sprintf("../05-results/%s/ma-models/%s-%s-%s.RData", mod, emo, er, param))
+  
+  fx <- tidy(m)
+  save(fx, file = sprintf("../05-results/%s/ma-fx/%s-%s-%s.RData", mod, emo, er, param))
+  return(NULL)
+}
+
+plan(multisession(workers=12L))
+ma_nested <- summ_df %>%
+  group_by(model, emo_item, ergoal, parameter) %>% 
+  filter(!parameter %in% c("mu_E", "sigma_E")) %>%
+  nest() %>%
+  ungroup() %>%
+  arrange(model, emo_item, ergoal, parameter) %>%
+  mutate(ma = 
+    future_pmap(
+      list(data, model, emo_item, ergoal, parameter)
+      , .f = possibly(ma_fun, NA_real_)
+      , .progress = T
+      , .options = furrr_options(packages = c("brms", "broom.mixed"))
+    ))
+closeAllConnections()
+```
+
+```{r}
+loadRData <- function(file, obj, rq){
+  file <- sprintf("../05-results/%s/ma-fx/%s", rq, file)
+  load(file)
+  get(ls()[grepl(obj, ls())])
+}
+
+ma_nested <- tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/ma-fx", .)))) %>%
+  unnest(file) %>%
+  mutate(fx = pmap(list(file, "fx", model), loadRData)) %>%
+  separate(file, c("emo_item", "ergoal", "parameter"), sep = "-") %>%
+    mutate(
+      parameter = str_remove_all(parameter, ".RData")
+      , ergoal = ifelse(ergoal == "NA", NA_real_, ergoal)
+      ) %>%
+  left_join(
+    summ_df %>%
+      group_by(model, emo_item, ergoal, parameter) %>% 
+      filter(!parameter %in% c("mu_E", "sigma_E")) %>%
+      nest() %>%
+      ungroup() %>%
+      filter(
+        (ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+        (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name)) |
+        is.na(ergoal)
+        ) %>%
+      arrange(model, emo_item, ergoal, parameter) 
+  )
+```
+
+```{r}
+nested_ma <- ma_nested %>%
+  filter(!map_lgl(data, is.null)) %>%
+  select(-data) %>% 
+  unnest(fx) %>%
+  filter(term != "sd__Observation") %>%
+  mutate(term = mapvalues(term, c("(Intercept)", "sd__(Intercept)"), c("M", "SD"))) %>%
+  select(-effect, -component, -group) %>%
+  mutate(
+    sig = ifelse(sign(conf.low) == sign(conf.high), "sig", "ns")
+    , est = sprintf("%.2f<br>[%.2f,%.2f]", estimate, conf.low, conf.high)
+    ) %>%
+  select(-(estimate:sig)) %>%
+  pivot_wider(
+    names_from = "term"
+    , values_from = "est"
+  ) %>%
+  inner_join(
+    ma_nested %>%
+      filter(!map_lgl(data, is.null)) %>%
+      select(-fx) %>%
+      unnest(data) %>% 
+      group_by(model, emo_item, ergoal, parameter) %>%
+      summarize_at(vars(mean), lst(min, max)) %>%
+      ungroup() %>%
+      mutate_at(vars(min, max), ~sprintf("%.2f", .))
+  ) %>%
+  mutate(
+    focal = ifelse(emo_item %in% c("Negative", "Positive"), "focal", "sup")
+    , parameter = mapvalues(
+      parameter, c("beta_E", "location"), 
+      c("Attractor Strength", "Attractor Location")
+      )
+    ) %>%
+  filter(!(model == "RQ2-int" & (grepl("beta", parameter) | !grepl("_", parameter)))) %>%
+  group_by(model, focal) %>%
+  nest() %>%
+  ungroup()
+```
+
+### RQ1 & RQ2 Main Effects
+
+```{r}
+ma_tab_fun <- function(d, rq, focal){
+  if(rq == "RQ1"){
+    d <- d %>% select(-ergoal)
+    cols <- c("Emotion", "Parameter", "M [CI]", "SD [CI]", "Min", "Max")
+    al <- c("l", "l", rep("c", 4))
+    cap <- "Simple Emotion Systems (RQ1)"
+  } else {
+    cols <- c("Emotion", "ER Goal", "Parameter", "M [CI]", "SD [CI]", "Min", "Max")
+    al <- c("l", "l", "l", rep("c", 4))
+    cap <- "Main Effects of Emotion Regulation Goals (RQ2 main)"
+  }
+  cap <- sprintf("<strong>Table SX</strong><br><em>Meta-Analytic Estimates and Descriptive Statistics of %s </em>", cap)
+  tab <- d %>%
+    kable(
+      .
+      , round = 2
+      , "html"
+      , col.names = cols
+      , escape = F
+      , align = al
+      , cap = cap
+    ) %>%
+    kable_classic(html_font = "Times", full_width = F) %>%
+    collapse_rows(1)
+  save_kable(tab, file = sprintf("../05-results/tables/%s/key-terms/tabSx-%s-%s-ma.html", rq, focal, str_to_lower(rq)))
+  return(tab)
+}
+
+nested_ma_main <- nested_ma %>%
+  filter(model != "RQ2-int") %>%
+  mutate(tab = pmap(list(data, model, focal), ma_tab_fun))
+```
+
+```{r}
+ma_tab_fun <- function(d, rq, focal){
+  cap <- sprintf("<strong>Table SX</strong><br><em>Meta-Analytic Estimates and Descriptive Statistics of %s </em>", cap)
+  d <- d %>% 
+    mutate(
+      ergoal = mapvalues(ergoal, c("goalNeg", "goalPos"), c("Goal to Change Negative Emotions", "Goal to Change Positive Emotions"))
+      , emo_item = paste(emo_item, "Emotion")
+      ) %>%
+    separate(parameter, c("param", "ergoal_lev")) %>%
+    mutate_at(vars(param, ergoal_lev), str_to_title) %>% 
+    mutate(ergoal_lev = factor(ergoal_lev, c("Decrease", "Maintain", "Increase"))) %>% 
+    arrange(emo_item, ergoal, param, ergoal_lev) %>%
+    unite(comb, emo_item, ergoal, sep = ": ")
+  
+  rs <- d %>% group_by(comb) %>% tally() %>% 
+      mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+  
+  tab <- d %>%
+    select(-comb) %>% 
+    kable(
+      .
+      , round = 2
+      , "html"
+      , col.names = cols
+      , escape = F
+      , align = al
+      , cap = cap
+    ) %>%
+    kable_classic(html_font = "Times", full_width = F) #%>%
+    # collapse_rows(1)
+  for (i in 1:nrow(rs)){
+    tab <- tab %>% 
+      kableExtra::group_rows(rs$comb[i], rs$start[i], rs$end[i]) 
+  }
+  tab
+  save_kable(tab, file = sprintf("../05-results/tables/RQ2-int/key-terms/tabSx-rq2int-%s-ma.html", rq))
+  return(tab)
+}
+
+nested_ma_int <- nested_ma %>%
+  filter(model == "RQ2-int") %>%
+  mutate(tab = pmap(list(data, model, focal), ma_tab_fun))
+
+nested_ma_int %>% filter(focal == "focal") %>% pull(tab)
+```
+
+## RQ3b Meta-Regressions
+
+```{r}
+mr_fun <- function(d, mod, emo, er, param, type, o_item){
+  if(type == "linear") load("../05-results/mr-sample-mod-linear.RData") else load("../05-results/mr-sample-mod-quadratic.RData") 
+  frm <- if(type == "linear") "1 + o_value" else "1 + o_value + o_value_2"
+  frm <- sprintf("mean | se(sd) ~ %s + (1 | SID)", frm)
+  # m <- brm(
+  #   frm
+  #   , data = d
+  #   , prior =
+  #     c(prior(exponential(.5), class = sd))
+  #       # , prior(exponential(.5), class = sigma))
+  #   , iter = 500
+  #   , warmup = 200
+  #   , cores = 4
+  #   , chains = 4
+  #   , seed = 15
+  #   , init = 0
+  #   # )
+  m <- update(
+    m
+    , newdata = d
+    , iter = 3000
+    , warmup = 1000
+    , cores = 4
+    , seed = 15
+    , init = 0
+  )
+  save(m, file = sprintf("../05-results/%s/mr-models/%s-%s-%s-%s-%s.RData", mod, emo, er, param, o_item, type))
+  
+  fx <- tidy(m)
+  save(fx, file = sprintf("../05-results/%s/mr-fx/%s-%s-%s-%s-%s.RData", mod, emo, er, param, o_item, type))
+  return(NULL)
+}
+
+plan(multisession(workers = 3L))
+mr_nested <- crossing(
+  type = c("linear", "quadratic")
+  , ma_nested# %>% select(-fx)
+) %>%
+  crossing(
+    .
+    , wb_long %>%
+      rename(o_value = wb_value, o_item = wb_item) %>%
+      mutate(cat = "wb") %>%
+      full_join(
+        erstrat %>% 
+          select(SID, er_strat_rep:avg_talkPos) %>%
+          pivot_longer(
+            cols = -SID
+            , names_to = "o_item"
+            , values_to = "o_value"
+            ) %>%
+          mutate(cat = "ER")
+        ) %>%
+      mutate(
+        o_value_2 = o_value^2
+        , SID = as.character(SID)
+        ) %>%
+      group_by(cat, o_item) %>%
+      nest() %>%
+      ungroup() %>%
+      rename(cor_data = data)
+  ) %>%
+  mutate(data = map2(data, cor_data, ~(.x) %>% left_join(.y))) %>%
+  select(-cor_data) 
+mr_nested %>%
+  anti_join(
+    tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+    mutate(file = map(model, ~list.files(sprintf("../05-results/%s/mr-fx", .)))) %>%
+    unnest(file) %>%
+    separate(file, c("emo_item", "ergoal", "parameter", "o_item", "type"), sep = "-") %>%
+    filter(!is.na(type)) %>%
+    mutate(
+      type = str_remove_all(type, ".RData")
+      , ergoal = ifelse(ergoal == "NA", NA_real_, ergoal)
+      )
+  ) %>%
+  filter(model %in% c("RQ1", "RQ2-int") & emo_item %in% c("Positive", "Negative")) %>%
+  mutate(ma = 
+    future_pmap(
+      # pmap(
+      list(data, model, emo_item, ergoal, parameter, type, o_item)
+      , .f = mr_fun
+      , .progress = T
+      , .options = furrr_options(packages = c("brms", "broom.mixed"))
+    ))
+closeAllConnections()
+```
+
+```{r}
+loadRData <- function(file, obj, rq){
+  file <- sprintf("../05-results/%s/mr-fx/%s", rq, file)
+  load(file)
+  get(ls()[grepl(obj, ls())])
+}
+
+mr_nested <- tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/mr-fx", .)))) %>%
+  unnest(file) %>%
+  mutate(fx = pmap(list(file, "fx", model), loadRData)) %>%
+  separate(file, c("emo_item", "ergoal", "parameter", "o_item", "type"), sep = "-") %>%
+    mutate(
+      type = str_remove_all(type, ".RData")
+      , ergoal = ifelse(ergoal == "NA", NA_real_, ergoal)
+      ) %>%
+  left_join(
+    summ_df %>%
+      group_by(model, emo_item, ergoal, parameter) %>% 
+      filter(!parameter %in% c("mu_E", "sigma_E")) %>%
+      nest() %>%
+      ungroup() %>%
+      filter(
+        (ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+        (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name)) |
+        is.na(ergoal)
+        ) %>%
+      arrange(model, emo_item, ergoal, parameter) 
+  )
+```
+
+```{r}
+mr_fx <- mr_nested %>% 
+  select(-data) %>%
+  unnest(fx) %>%
+  filter(
+    (type == "linear" & term == "o_value") |
+    (type == "quadratic" & term == "o_value_2")
+    ) %>%
+  mutate(
+    sig = ifelse(sign(conf.low) == sign(conf.high), "sig", "ns")
+    , focal = ifelse(emo_item %in% c("Positive", "Negative"), "focal", "sup")
+  ) %>%
+  mutate_at(vars(estimate, conf.low, conf.high), ~sprintf("%.2f", .)) %>%
+  mutate(
+    CI = sprintf("[%s, %s]", conf.low, conf.high)
+    , est = sprintf("%s<br>[%s, %s]", estimate, conf.low, conf.high)
+  ) %>%
+  mutate_at(vars(est, estimate, CI), ~ifelse(sig == "sig", sprintf("<strong>%s</strong>", .), .)) %>%
+  select(model, o_item, emo_item, ergoal, parameter, type, term, focal, est, estimate, CI)
+```
+
+Tabea code (trying to fix it duplicates)
+
+```{r}
+View(mr_fx)
+ {mr_fx} |>
+  dplyr::summarise(n = dplyr::n(), .by = c(o_item, type, emo_item, parameter)) |>
+  dplyr::filter(n > 1L) 
+
+#h1 <- rep(1, 10); names(h1) <- c(" ", rep(c("Linear", "Quadratic"), times = 4))
+h2 <- c(2, rep(2, 4)); names(h2) <- c(" ", rep(c("Attractor Strength", "Attractor Location"), times = 2))
+h3 <- c(2, rep(4, 2)); names(h3) <- c(" ", "Negative Emotion", "Positive Emotion")
+
+rq3b_1_tab <- mr_fx %>%
+  filter(model == "RQ1") %>%
+  select(-ergoal) %>%
+  filter(focal == "focal") %>%
+  select(-term, -model, -focal, -est) %>%
+  pivot_wider(
+    names_from = c("emo_item", "parameter")
+    , values_from = c("estimate", "CI")
+    , names_glue = "{emo_item}_{parameter}_{.value}"
+  ) %>%
+  select(o_item, type, matches("Negative_beta"), matches("Negative_loc"), matches("Positive_beta"), matches("Positive_loc")) %>%
+  kable(
+    .
+    , "html"
+    , escape = F
+    , col.names = c("Well-Being/ER Indicator", "Term", rep(c("Est.", "[CI]"), times = 4))
+    , align = c("l", "l", rep("c", 8))
+    , cap = "<strong>Table X</strong><br><em>Linear and Quadratic Associations Between Emotion Regulation and Well-Being Indicators and Emotion Attractor Location and Strength</em>"
+  ) %>%
+  kable_classic(full_width = F, html_font = "Times") %>%
+   #add_header_above(h1) %>%
+  add_header_above(h2) %>%
+  add_header_above(h3)
+rq3b_1_tab
+save_kable(rq3b_1_tab, file = "../05-results/tables/tab-x-rq3b-emo-wb-correlates.html")
+```
+
+```{r}
+h1 <- rep(1, 9); names(h1) <- c(" ", rep(c("Linear", "Quadratic"), times = 4))
+h2 <- c(2, rep(2, 4)); names(h2) <- c(" ", rep(c("Attractor Strength", "Attractor Location"), times = 2))
+h3 <- c(2, rep(4, 2)); names(h3) <- c(" ", "Negative Emotion", "Positive Emotion")
+
+rq3b_1_tab <- mr_fx %>%
+  filter(model == "RQ1") %>%
+  select(-ergoal) %>%
+  filter(focal == "focal") %>%
+  select(-term, -model, -focal, -est) %>%
+  pivot_wider(
+    names_from = c("emo_item", "parameter")
+    , values_from = c("estimate", "CI")
+    , names_glue = "{emo_item}_{parameter}_{.value}"
+  ) %>%
+  select(o_item, type, matches("Negative_beta"), matches("Negative_loc"), matches("Positive_beta"), matches("Positive_loc")) %>%
+  kable(
+    .
+    , "html"
+    , escape = F
+    , col.names = c("Well-Being/ER Indicator", "Term", rep(c("Est.", "[CI]"), times = 4))
+    , align = c("l", "l", rep("c", 8))
+    , cap = "<strong>Table X</strong><br><em>Linear and Quadratic Associations Between Emotion Regulation and Well-Being Indicators and Emotion Attractor Location and Strength</em>"
+  ) %>%
+  kable_classic(full_width = F, html_font = "Times") %>%
+   add_header_above(h1) %>%
+  add_header_above(h2) %>%
+  add_header_above(h3)
+rq3b_1_tab
+save_kable(rq3b_1_tab, file = "../05-results/tables/tab-x-rq3b-emo-wb-correlates.html")  
+```
+
+```{r}
+rq3b_2_tab <- mr_fx %>%
+  filter(
+    model == "RQ2-int" & 
+    focal == "focal" & 
+    (grepl("location_", parameter) | grepl("strength_", parameter))
+    ) %>%
+  separate(parameter, c("parameter", "direction"), sep = "_") %>% 
+  select(-term, -model, -focal, -est, -ergoal) %>%
+  pivot_wider(
+    names_from = c("emo_item", "parameter")
+    , values_from = c("estimate", "CI")
+    , names_glue = "{emo_item}_{parameter}_{.value}"
+  ) %>%
+  select(o_item, direction, type, matches("Negative_str"), matches("Negative_loc"), matches("Positive_str"), matches("Positive_loc")) %>%
+  mutate(
+    o_item = factor(o_item, levels = cor_items$old_name, labels = cor_items$long_name)
+    , direction = factor(str_to_title(direction), c("Decrease", "Maintain", "Increase"))
+    , type = str_to_title(type)
+    ) %>%
+  arrange(o_item, direction, type)
+
+rs <- rq3b_2_tab %>% group_by(o_item) %>% tally() %>% 
+      mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+
+rq3b_2_tab <- rq3b_2_tab %>%
+  select(-o_item) %>%
+  kable(
+    .
+    , "html"
+    , escape = F
+    , col.names = c("Direction", "Term", rep(c("Est.", "[CI]"), times = 4))
+    , align = c("l", "l", rep("c", 8))
+    , cap = "<strong>Table X</strong><br><em>Linear and Quadratic Associations Between Emotion Regulation and Well-Being Indicators and Emotion Attractor Location and Strength</em>"
+  ) %>%
+  kable_classic(full_width = F, html_font = "Times") %>%
+  # add_header_above(h1) %>%
+  add_header_above(h2) %>%
+  add_header_above(h3)
+
+for (i in 1:nrow(rs)){
+    rq3b_2_tab <- rq3b_2_tab %>% 
+      kableExtra::group_rows(rs$o_item[i], rs$start[i], rs$end[i]) 
+}
+rq3b_2_tab
+save_kable(rq3b_2_tab, file = "../05-results/tables/tab-x-rq3b-int-wb-correlates.html") 
+```
+
+# Averages and Individual differences in Attractor Location & Strength
+
+## Just Emotions
+
+```{r}
+
+
+summ_df %>% 
+  mutate(sig = ifelse(sign(lower) == sign(upper), "sig", "ns")) %>%
+  filter(model == "RQ2-int" & parameter %in% c("beta_ER", "beta_ExER")) %>% View
+# Negative emotions Attractor Location
+
+# some locations are below 0 (though range of scores is between 0-10, so will exclude these for now)
+
+# summ_df %>%
+#   filter(.,model=="RQ1",emo_item=="Negative",parameter=="location",mean>0)%>%summarise(
+#     mean_location=mean(mean,na.rm=T),
+#     sd_location=sd(mean,na.rm=T),
+#     min_location=min(mean,na.rm=T),
+#     max_location=max(mean,na.rm=T),
+#     median_location=median(mean,na.rm=T),
+#     iqr_location= IQR(mean,na.rm=T))
+# 
+# # Negative emotions Attractor Strength
+# 
+# summ_df %>%
+#    filter(.,model=="RQ1",emo_item=="Negative",parameter=="beta_E",mean>-10)%>%summarise(
+#     mean_strength=mean(mean,na.rm=T),
+#     sd_strength=sd(mean,na.rm=T),
+#     max_strength=min(mean,na.rm=T),
+#     min_strength=max(mean,na.rm=T),
+#     median_strength=median(mean,na.rm=T),
+#     iqr_strength= IQR(mean,na.rm=T))
+# # right now I'm just kicking out anyone with attractor strength<-10, but should find better way to exclude ones with implausible location
+# 
+# #Positive emotions Attractor Location 
+# summ_df %>%
+#    filter(.,model=="RQ1",emo_item=="Positive",parameter=="location",mean>0)%>%summarise(
+#     mean_location=mean(mean,na.rm=T),
+#     sd_location=sd(mean,na.rm=T),
+#     min_location=min(mean,na.rm=T),
+#     max_location=max(mean,na.rm=T),
+#     median_location=median(mean,na.rm=T),
+#     iqr_location= IQR(mean,na.rm=T))
+# 
+# # Positive emotions Attractor Strength
+# 
+# summ_df %>%
+#    filter(.,model=="RQ1",emo_item=="Positive",parameter=="beta_E",mean>-10)%>%summarise(
+#     mean_strength=mean(mean,na.rm=T),
+#     sd_strength=sd(mean,na.rm=T),
+#     max_strength=min(mean,na.rm=T),
+#     min_strength=max(mean,na.rm=T),
+#     median_strength=median(mean,na.rm=T),
+#     iqr_strength= IQR(mean,na.rm=T))
+
+summ_rq1 <- summ_df %>%
+  filter(model == "RQ1" & emo_item %in% c("Negative", "Positive") & parameter %in% c("beta_E", "location")) %>%
+  group_by(emo_item, parameter) %>%
+  rename(est = mean) %>%
+  summarize(
+    mean   = mean(est,na.rm=T),
+    sd     = sd(est,na.rm=T),
+    min    = min(est,na.rm=T),
+    max    = max(est,na.rm=T),
+    median = median(est,na.rm=T),
+    iqr    = IQR(est,na.rm=T)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parameter = factor(
+      parameter, c("beta_E", "location"), 
+      c("Attractor Strength", "Attractor Location")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    )
+```
+
+### Table
+
+```{r}
+summ_rq1_tab <- summ_rq1 %>%
+  kable(.
+        , "html"
+        , col.names = c("Emotion Item", "Model Term", "M", "SD", "Min", "Max", "Med", "IQR")
+        , caption = "<strong>Table X</strong><br>
+        <em>Summary Statistics of Key Model Parameters for RQ1"
+        , digits = 2
+        , align = c("l", "l", rep("c", 6))
+        ) %>%
+  kable_classic(html_font = "Times", full_width = F) %>%
+  collapse_rows(1, valign = "top")
+summ_rq1_tab
+save_kable(summ_rq1_tab, file = "../05-results/tables/RQ1/table-sX-rq1-summary.html")
+```
+
+### Plot
+
+```{r}
+summ_df %>%
+  filter(
+    model == "RQ1" & 
+    emo_item %in% c("Negative", "Positive") & 
+    parameter %in% c("beta_E", "location")
+    ) %>%
+  mutate(
+    parameter = factor(
+      parameter, c("beta_E", "location"), 
+      c("Attractor Strength", "Attractor Location")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    ) %>%
+   ggplot(aes(x = mean)) + 
+    geom_histogram(aes(fill = emo_item), alpha = .5, color = "black") + 
+    geom_text(
+      data = summ_rq1 %>% mutate(pos = ifelse(parameter == "Attractor Location", 0, -5.5))
+      , aes(
+        label = sprintf("M = %.2f\n(SD = %.2f)", median, sd)
+        , x = pos, y = 60
+        )
+        , hjust = 0, vjust = 1
+      ) + 
+    scale_fill_manual(values = c("red3", "goldenrod2")) + 
+    labs(
+      x = "Parameter Estimate"
+      , y = "Density"
+      , title = "Individual Differences in Parameter Estimates"
+    ) + 
+    facet_grid(emo_item ~ parameter, scales = "free_x") + 
+    my_theme() + 
+   theme(legend.position = "none")
+```
+
+## Main effect ER Goals
+
+```{r}
+# 
+# # Negative emotions Attractor Location
+# summ_df %>%
+#   filter(.,model=="RQ2-main",emo_item=="Negative",parameter=="location",mean>0)%>%summarise(
+#     mean_location=mean(mean,na.rm=T),
+#     sd_location=sd(mean,na.rm=T),
+#     min_location=min(mean,na.rm=T),
+#     max_location=max(mean,na.rm=T))
+# 
+# # the average location is now a bit lower - inclusion of goals shifts location of attractor
+# 
+# # Negative emotions Attractor Strength
+# 
+# summ_df %>%
+#    filter(.,model=="RQ2-main",emo_item=="Negative",parameter=="beta_E",mean>-10)%>%summarise(
+#     mean_strength=mean(mean,na.rm=T),
+#     sd_strength=sd(mean,na.rm=T),
+#     max_strength=min(mean,na.rm=T),
+#     min_strength=max(mean,na.rm=T))
+# 
+# summ_df %>%
+#    filter(.,model=="RQ2-main",emo_item=="Negative",parameter=="beta_ER",mean>-10)%>%summarise(
+#     mean_strength=mean(mean,na.rm=T),
+#     sd_strength=sd(mean,na.rm=T),
+#     max_strength=min(mean,na.rm=T),
+#     min_strength=max(mean,na.rm=T))
+# 
+# 
+# # Positive emotions Attractor Location
+# summ_df %>%
+#   filter(.,model=="RQ2-main",emo_item=="Positive",parameter=="location",mean>0)%>%summarise(
+#     mean_location=mean(mean,na.rm=T),
+#     sd_location=sd(mean,na.rm=T),
+#     min_location=min(mean,na.rm=T),
+#     max_location=max(mean,na.rm=T))
+# 
+# # Positive emotions Attractor Strength
+# 
+# summ_df %>%
+#    filter(.,model=="RQ2-main",emo_item=="Positive",parameter=="beta_E",mean>-10)%>%summarise(
+#     mean_strength=mean(mean,na.rm=T),
+#     sd_strength=sd(mean,na.rm=T),
+#     max_strength=min(mean,na.rm=T),
+#     min_strength=max(mean,na.rm=T))
+# 
+# summ_df %>%
+#    filter(.,model=="RQ2-main",emo_item=="Positive",parameter=="beta_ER",mean>-10)%>%summarise(
+#     mean_strength=mean(mean,na.rm=T),
+#     sd_strength=sd(mean,na.rm=T),
+#     max_strength=min(mean,na.rm=T),
+#     min_strength=max(mean,na.rm=T))
+
+summ_rq2 <- summ_df %>%
+  filter(model == "RQ2-main" & emo_item %in% c("Negative", "Positive") & parameter %in% c("beta_E", "location", "beta_ER")) %>%
+  group_by(emo_item, ergoal, parameter) %>%
+  rename(est = mean) %>%
+  summarize(
+    mean   = mean(est,na.rm=T),
+    sd     = sd(est,na.rm=T),
+    min    = min(est,na.rm=T),
+    max    = max(est,na.rm=T),
+    median = median(est,na.rm=T),
+    iqr    = IQR(est,na.rm=T)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parameter = factor(
+      parameter, c("beta_E", "beta_ER", "location"), 
+      c("Attractor Strength", "Emotion Regulation Efficacy", "Attractor Location")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    )
+```
+
+### Table
+
+```{r}
+summ_rq2_tab <- summ_rq2 %>%
+  arrange(ergoal, emo_item, parameter) %>%
+  select(-ergoal) %>%
+  kable(.
+        , "html"
+        , col.names = c("Emotion Item", "Model Term", "M", "SD", "Min", "Max", "Med", "IQR")
+        , caption = "<strong>Table X</strong><br>
+        <em>Summary Statistics of Key Model Parameters for RQ2"
+        , digits = 2
+        , align = c("l", "l", rep("c", 6))
+        ) %>%
+  kable_classic(html_font = "Times", full_width = F) %>%
+  kableExtra::group_rows("Goal to Change Negative Emotions", 1, 6) %>%
+  kableExtra::group_rows("Goal to Change Positive Emotions", 7, 12) 
+summ_rq2_tab
+save_kable(summ_rq2_tab, file = "../05-results/tables/RQ2-main/table-sX-rq2-main-summary.html")
+```
+
+### Plots
+
+```{r}
+rq2_main_dist <- function(d, er_goal){
+  eg <- mapvalues(er_goal, c("goalNeg", "goalPos"), c("Goal to Change Negative Emotions", "Goal to Change Positive Emotions"))
+  d %>%
+    ggplot(aes(x = mean)) + 
+      geom_histogram(aes(fill = emo_item), alpha = .5, color = "black") + 
+      geom_text(
+        data = summ_rq2 %>% 
+          filter(ergoal == er_goal) %>%
+          mutate(pos = 
+                   ifelse(parameter == "Attractor Location", 0, 
+                   ifelse(parameter == "Attractor Strength", -10, -1.5))
+                 )
+        , aes(
+          label = sprintf("M = %.2f\n(SD = %.2f)", median, sd)
+          , x = pos, y = 80
+          )
+          , hjust = 0, vjust = 1
+        ) +
+      scale_fill_manual(values = c("red3", "goldenrod2")) + 
+      labs(
+        x = "Individual Differences in Parameter Estimates"
+        , y = "Density"
+        , title = eg
+        , subtitle = "Main Effect of Emotion Regulation Goal Models"
+      ) + 
+      facet_grid(emo_item ~ parameter, scales = "free_x") + 
+      my_theme() + 
+     theme(legend.position = "none")
+}
+
+rq2_main_dist_plots <- summ_df %>%
+  filter(model == "RQ2-main" & emo_item %in% c("Negative", "Positive") & parameter %in% c("beta_E", "location", "beta_ER")) %>%
+  mutate(
+    parameter = factor(
+      parameter, c("beta_E", "beta_ER", "location"), 
+      c("Attractor Strength", "Emotion Regulation Efficacy", "Attractor Location")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    ) %>%
+  group_by(ergoal) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(p = map2(data, ergoal, rq2_main_dist))
+rq2_main_dist_plots$p[[1]] / rq2_main_dist_plots$p[[2]] + labs(subtitle = NULL)
+```
+
+## Interaction effect ER Goals on Change in Emotion
+
+```{r}
+summ_rq2_int <- summ_df %>%
+  filter(model == "RQ2-int" & emo_item %in% c("Negative", "Positive") & parameter %in% c("beta_E", "mu_E", "beta_ER", "beta_ExER",   "location_decrease" , "location_maintain"  , "location_increase",
+       "strength_decrease",
+       "strength_maintain",
+       "strength_increase")) %>%
+  filter(abs(mean) < 10) %>%
+  group_by(emo_item, ergoal, parameter) %>%
+  rename(est = mean) %>%
+  summarize(
+    mean   = mean(est,na.rm=T),
+    sd     = sd(est,na.rm=T),
+    min    = min(est,na.rm=T),
+    max    = max(est,na.rm=T),
+    median = median(est,na.rm=T),
+    iqr    = IQR(est,na.rm=T)#,
+    # n      = n()
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parameter = factor(
+      parameter, c("beta_E", "beta_ER", "beta_ExER", "mu_E","location_decrease" , "location_maintain"  , "location_increase",
+       "strength_decrease",
+       "strength_maintain",
+       "strength_increase"), 
+      c("Attractor Strength", "Emotion Regulation Efficacy", "Emotion x Goals Interaction", "Emotion Intercept", "Location Goal Decrease" , "Location Goal Maintain"  , "Location Goal Maintain",
+       "Attractor Strength Goal Decrease",
+       "Attractor Strength Goal Maintain",
+       "Attractor Strength Goal Increase" )
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    )
+```
+
+### Table
+
+```{r}
+# should probably only include positive emotion for wanting to change positive emotion and vice versa for table in main manuscript
+
+summ_rq2_int_tab <- summ_rq2_int %>%
+  arrange(ergoal, emo_item, parameter) %>%
+  select(-ergoal) %>%
+  mutate_at(vars(mean:iqr), ~sprintf("%.2f", .)) %>%
+  kable(.
+        , "html"
+        , col.names = c("Emotion Item", "Model Term", "M", "SD", "Max", "Min", "Med", "IQR")
+        , caption = "<strong>Table X</strong><br>
+        <em>Summary Statistics of Key Model Parameters for RQ2"
+        # , digits = 2
+        , align = c("l", "l", rep("c", 6))
+        ) %>%
+  kable_classic(html_font = "Times", full_width = F) %>%
+  kableExtra::group_rows("Goal to Change Negative Emotions", 1, 8) %>%
+  kableExtra::group_rows("Goal to Change Positive Emotions", 9, 16) 
+summ_rq2_int_tab
+save_kable(summ_rq2_int_tab, file = "../05-results/tables/RQ2-int/table-sX-rq2-int-summary.html")
+```
+
+### Plots
+
+```{r}
+rq2_int_dist <- function(d, er_goal){
+  eg <- mapvalues(er_goal, c("goalNeg", "goalPos"), c("Goal to Change Negative Emotions", "Goal to Change Positive Emotions"))
+  d %>%
+    ggplot(aes(x = mean)) + 
+    geom_histogram(aes(fill = emo_item), alpha = .5, color = "black") + 
+    geom_text(
+      data = summ_rq2_int %>%
+        filter(ergoal == er_goal) %>%
+        mutate(pos = 
+          ifelse(parameter == "Emotion Intercept", 0, 
+          ifelse(parameter == "Attractor Strength", -5,
+          ifelse(parameter == "Emotion x Goals Interaction", -1.5, -3)))
+          )
+      , aes(
+        label = sprintf("M = %.2f\n(SD = %.2f)", median, sd)
+        , x = pos, y = 100
+        )
+        , hjust = 0, vjust = .6
+      ) +
+    scale_fill_manual(values = c("red3", "goldenrod2")) + 
+    labs(
+      x = "Individual Differences in Parameter Estimates"
+      , y = "Count"
+      , title = eg
+      , subtitle = "Emotion x Emotion Regulation Goal Interaction Models" 
+    ) + 
+    facet_grid(emo_item ~ parameter, scales = "free_x") + 
+    my_theme() + 
+   theme(legend.position = "none")
+}
+
+rq2_int_dist_plots <- summ_df %>%
+  filter(model == "RQ2-int" & emo_item %in% c("Negative", "Positive") & parameter %in% c("beta_E", "mu_E", "beta_ER", "beta_ExER")) %>%
+  filter(
+    (parameter == "beta_ExER" & abs(mean) < 1.5) | 
+    (parameter == "beta_E" & abs(mean) < 5) |
+    (parameter %in% c("mu_E", "beta_ER") & abs(mean) < 10)
+    )  %>%
+  mutate(
+    parameter = factor(
+      parameter, c("beta_E", "beta_ER", "beta_ExER", "mu_E"), 
+      c("Attractor Strength", "Emotion Regulation Efficacy", "Emotion x Goals Interaction", "Emotion Intercept")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    ) %>%
+  group_by(ergoal) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(p = map2(data, ergoal, rq2_int_dist))
+rq2_int_dist_plots$p[[1]] / rq2_int_dist_plots$p[[2]] + labs(subtitle = NULL)
+
+```
+
+### Other Summaries
+
+```{r}
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Negative",ergoal=="goalNeg",parameter=="beta_ExER",abs(mean) < 10)%>%
+   mutate(int_pos = ifelse(mean > 0 & lower > 0 & upper > 0, 1, 0),
+          int_neg = ifelse(mean < 0 & lower <0 & upper < 0, 1, 0 ))%>%
+  mutate(int_ns = ifelse(int_pos==0 & int_neg==0, 1, 0))%>%
+  select(int_pos, int_neg, int_ns) %>%  # Select the new columns
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%  # Reshape the data
+  group_by(variable, value) %>%
+  summarize(count = n())
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Negative",ergoal=="goalNeg",parameter=="beta_ExER",abs(mean) < 10, SID=="98331") # non significant one for plot
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Negative",ergoal=="goalNeg",parameter=="beta_ExER",abs(mean) < 10, SID=="97389") # positive interaction term -- means "successful" 
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Negative",ergoal=="goalNeg",parameter=="beta_ExER",abs(mean) < 10, SID=="25637") # negative interaction term -- means "unsuccessful" - this person is showing more negative change when they have the goal to increase than when they have the goal to decrease
+
+
+# Same for positive emotions
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10)%>%
+   mutate(int_pos = ifelse(mean > 0 & lower > 0 & upper > 0, 1, 0),
+          int_neg = ifelse(mean < 0 & lower <0 & upper < 0, 1, 0 ))%>%
+  mutate(int_ns = ifelse(int_pos==0 & int_neg==0, 1, 0))%>%
+  select(int_pos, int_neg, int_ns) %>%  # Select the new columns
+  pivot_longer(cols = everything(), names_to = "variable", values_to = "value") %>%  # Reshape the data
+  group_by(variable, value) %>%
+  summarize(count = n())
+
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="26754") # negative  interaction term -- means "unsuccessful"  
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="31488") # negative  interaction term -- means "unsuccessful"  
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="19033") # non significant
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="121262") # non significant
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="12045") # positive interaction term = successful but timescale is off for this one 
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="") # 
+```
+
+Trying to understand the role of the lower order effects in the interpretation of the interaction parameter
+
+```{r}
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",abs(mean) < 10, SID=="26754") # negative  interaction term -- means "unsuccessful"  
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",abs(mean) < 10, SID=="31488") # negative  interaction term -- means "unsuccessful"  
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="19033") # non significant
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="121262") # non significant
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="12045") # positive interaction term = successful but timescale is off for this one 
+
+summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10, SID=="") # 
+```
+
+## Caterpillar Plots
+
+```{r}
+cat_plot_fun <- function(d){
+  ord <- d %>% 
+    arrange(desc(mean)) %>%
+    pull(SID)
+  x %>%
+    ggplot(aes(x = value, y = id)) + 
+      geom_line(aes(group = id)) + 
+      geom_point(aes(color = type)) +
+      scale_color_manual(values = c("blue", "red")) + 
+      labs(x = par, y = NULL, title = par) + 
+      my_theme()
+  p1 <- d %>%
+    mutate(
+      SID = factor(SID, levels = ord)
+      , sig = ifelse(sign(lower) == sign(upper), "sig", "ns")
+      ) %>%
+    ggplot(aes(x = mean, y = SID)) + 
+      # geom_density(aes(y = after_stat(density))) + 
+      geom_errorbar(
+        aes(xmin = lower, xmax = upper)
+        , width = .1
+      ) + 
+      geom_point() +
+      labs(
+        x = "Parameter Estimate"
+        , y = "SID"
+        , title = "Individual Differences in Parameter Estimates"
+      ) + 
+      # facet_grid(emo_item ~ parameter, scales = "free_x") + 
+      my_theme() + 
+      theme(axis.text.y = element_blank())
+  
+  d %>%
+    ggplot(aes(x = mean)) + 
+      geom_density() + 
+      theme_void()
+}
+
+summ_df %>%
+  filter(
+    model == "RQ1" & 
+    emo_item %in% c("Negative", "Positive") & 
+    parameter %in% c("beta_E", "location")
+    ) %>%
+  group_by(model, emo_item, ergoal, parameter) %>%
+  nest() %>%
+  ungroup() 
+  # mutate(
+  #   parameter = factor(
+  #     parameter, c("beta_E", "location"), 
+  #     c("Attractor Strength", "Attractor Location")
+  #     )
+  #   , emo_item = factor(
+  #     emo_item, c("Negative", "Positive")
+  #     , c("Negative Emotion", "Positive Emotion")
+  #     )
+  #   ) %>%
+  
+   
+```
+
+# RQ3 - Correlates
+
+```{r}
+
+cor_tab_fun <- function(r){
+  r$r <- apply(r$r, c(1,2), function(x) sprintf("%.2f", x))
+  r$r[which(r$p < .05, arr.ind = T)] <- 
+    sprintf("<strong>%s</strong>" ,r$r[which(r$p < .05, arr.ind = T)])
+  r$r[upper.tri(r$r, diag = F)] <- ""
+  diag(r$r) <- "--"
+  r <- r$r %>% data.frame %>%
+    rownames_to_column("item") %>%
+    as_tibble() %>%
+    mutate_all(as.character) %>%
+    select(item, everything()) %>%
+    mutate(item = sprintf("%i. %s", seq(1, ncol(r$r)), item)) %>%
+    setNames(c("item", seq(1, ncol(r$r)))) 
+  return(r)
+}
+```
+
+## RQ3a - Correlations among parameters
+
+```{r}
+nested_r <- summ_df %>% 
+  filter(model %in% c("RQ1", "RQ2-int") & grepl("strength|location", parameter)) %>%
+  # filter((parameter == "location" & mean > 0) | parameter == "beta_E") %>%
+  select(model, SID, emo_item, ergoal, parameter, mean) %>%
+  # mutate(parameter = mapvalues(parameter, c("beta_E"), c("strength"))) %>%
+  mutate(focal = ifelse(emo_item %in% c("Positive", "Negative"), "focal", "sup")) %>%
+  group_by(model, focal) %>%
+  nest() %>%
+  ungroup()
+  # mutate(data = map(data, ~(. %>% 
+  #     pivot_wider(
+  #       names_from = c("emo_item", "parameter")
+  #       , values_from = "mean"
+  #     )
+
+
+
+cor_tab_html_fun <- function(tab, focal, rq){
+  len <- nrow(tab)
+  tab <- tab %>%
+    separate(item, c("num", "emo_item", "param"), sep = "[ ]|_") %>%
+    kable(
+      .
+      , "html"
+      , escape = F
+      , col.names = c(" ", "Variable", "Parameter", paste0(1:len, "."))
+      , align = c("l", "l", "l", rep("c", len))
+      , caption = sprintf("<strong>Table SX</strong><br><em>RQ3a: Correlations Among %s Parameters</em>", rq)
+    ) %>%
+    kable_classic(html_font = "Times")
+  save_kable(tab, file = sprintf("../05-results/tables/%s/correlations/%s.html", rq, focal))
+  return(tab)
+}
+
+lm_fun <- function(d) tidy(effectsize::standardize(lm(strength ~ location + location2, data = d)), conf.int = T)
+
+quad_fun <- function(d){
+  d %>% 
+    pivot_wider(
+      names_from = "parameter"
+      , values_from = "mean"
+    ) %>%
+    mutate(location2 = location^2) %>%
+    group_by(emo_item) %>%
+    nest() %>%
+    ungroup() %>%
+    mutate(m = map(data, lm_fun)) %>%
+    select(-data) %>% 
+    unnest(m) %>%
+    filter(term == "location2")
+}
+
+nested_rq1_r <- summ_df %>% 
+  filter(model == "RQ1" & parameter %in% c("beta_E", "location")) %>%
+  filter((parameter == "location" & mean > 0) | parameter == "beta_E") %>%
+  select(SID, emo_item, parameter, mean) %>%
+  mutate(
+    focal = ifelse(emo_item %in% c("Positive", "Negative"), "focal", "sup")
+    , parameter = mapvalues(parameter, c("beta_E"), c("strength"))
+    ) %>%
+  arrange(focal, emo_item, parameter) %>%
+  group_by(focal) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(
+    r2 = map(data, quad_fun)
+    , data = map(data, ~(.) %>% 
+      pivot_wider(
+        names_from = c("emo_item", "parameter")
+        , values_from = "mean"
+      ))
+    , r = map(data, ~(.) %>% select(-SID) %>% corr.test())
+    , rtab = map(r, cor_tab_fun)
+    , rtab_html = pmap(list(rtab, focal, "RQ1"), cor_tab_html_fun)
+  )
+
+nested_rq1_r %>% filter(focal == "focal") %>% pull(rtab_html)
+
+rq1_r2 <- nested_rq1_r %>% 
+  select(focal, r2) %>%
+  unnest(r2) %>%
+  select(-term) %>%
+  mutate_at(vars(estimate, conf.low, conf.high), ~sprintf("%.2f", .)) %>%
+  mutate(
+    sig = ifelse(p.value < .05, "sig", "ns")
+    , CI = sprintf("[%s, %s]", conf.low, conf.high)
+    ) %>%
+  mutate_at(vars(estimate, CI), ~ifelse(sig == "sig", sprintf("<strong>%s</strong>", .), .)) %>%
+  select(focal, emo_item, estimate, CI) %>%
+  mutate(focal = factor(focal, c("focal", "sup"), c("Focal", "Supplementary"))) %>%
+  kable(
+    .
+    , "html"
+    , escape = F
+    , col.names = c("Emotion Item Set", "Emotion", "Std. Est.", "CI")
+    , align = c("l", "l", "c", "c")
+    , cap = "<strong>Table SX</strong><br>Associations between Attractor Location^2 and Attractor Strength from RQ1"
+  ) %>%
+  kable_classic(full_width = F, html_font = "Times") %>%
+  collapse_rows(1, "top")
+rq1_r2
+save_kable(rq1_r2, file = "../05-results/tables/tab-sx-loc2-cors.html")
+```
+
+```{r}
+cor_tab_html_fun <- function(tab, focal, rq){
+  tab <- tab %>%
+    separate(
+      item
+      , c("num", "emo_item", "ergoal", "parameter", "ergoal_lev")
+      , sep = "[ ]|_")
+  len <- nrow(tab)
+  tab <- tab %>%
+    select(-emo_item, -ergoal) %>%
+    kable(
+      .
+      , "html"
+      , escape = F
+      , col.names = c(" ", "Variable", " ", paste0(1:len, "."))
+      , align = c("l", rep("c", len + 2))
+      , caption = sprintf("<strong>Table SX</strong><br><em>RQ3a: Correlations Among %s Parameters</em>", rq)
+    ) %>%
+    kable_classic(html_font = "Times") %>%
+    kableExtra::group_rows("Negative Emotions: Change Negative Emotions", 1, len/2) %>%
+    kableExtra::group_rows("Positive Emotions: Change Positive Emotions", len/2+1, len) %>%
+    add_header_above(c(" " = 3, "Negative Emotions: Change Negative Emotions" = len/2, "Positive Emotions: Change Positive Emotions" = len/2)) %>%
+    add_header_above(c(" " = 3, "Zero-Order Correlations" = len))
+  save_kable(tab, file = sprintf("../05-results/tables/%s/correlations/%s.html", rq, focal))
+  return(tab)
+}
+nested_rq2int_r <- summ_df %>% 
+  filter(model == "RQ2-int" & grepl("location_|strength_", parameter)) %>%
+  select(SID, emo_item, ergoal, parameter, mean) %>%
+  filter((ergoal == "goalNeg" & emo_item %in% c("Negative", neg_emo_items$long_name)) | 
+         (ergoal == "goalPos" & emo_item %in% c("Positive", pos_emo_items$long_name))) %>%
+  mutate(
+    focal = ifelse(emo_item %in% c("Positive", "Negative"), "focal", "sup")
+    ) %>%
+  arrange(focal, emo_item, ergoal, parameter) %>%
+  group_by(focal) %>%
+  nest() %>%
+  mutate(
+    data = map(data, ~(.) %>% 
+      pivot_wider(
+        names_from = c("emo_item", "ergoal", "parameter")
+        , values_from = "mean"
+      ))
+    , r = map(data, ~(.) %>% select(-SID) %>% corr.test())
+    , rtab = map(r, cor_tab_fun)
+    , rtab_html = pmap(list(rtab, focal, "RQ2-int"), cor_tab_html_fun)
+  )
+```
+
+Emotion only models and DEP/SWL
+
+## Just Emotions
+
+```{r}
+rq1_corr_dat <- summ_df %>% 
+  filter(model == "RQ1" & parameter %in% c("beta_E", "location")) %>%
+  filter((parameter == "location" & mean > 0) | parameter == "beta_E") %>%
+  select(SID, emo_item, parameter, mean) %>%
+  mutate(parameter = mapvalues(parameter, c("beta_E"), c("strength"))) %>%
+  pivot_wider(
+    names_from = c("emo_item", "parameter")
+    , values_from = "mean"
+  ) %>%
+  full_join(
+    wb_long %>%
+      pivot_wider(names_from = wb_item, values_from =wb_value) %>% 
+      mutate(SID = as.character(SID)) %>%
+      select(SID, DEP, SWL)
+  ) %>%
+  left_join(
+    erstrat %>% 
+      select(SID, er_strat_rep:avg_talkPos) %>%
+      mutate(SID = as.character(SID))
+    )
+
+#only include people where location is within range
+rq1_corr_dat<-filter(rq1_corr_dat,!is.na(Negative_location),!is.na(Positive_location))
+
+  
+corr.test(select(rq1_corr_dat,c(, "DEP", "SWL","Negative_location", "Positive_location", "Negative_strength", "Positive_strength", "er_strat_rep", "avg_accept", "avg_coRea", 
+"avg_dist", "avg_mask", "avg_min", "avg_posRea", "avg_rem", "avg_rum", 
+"avg_savor", "avg_selApp", "avg_selAv", "avg_socShr", "avg_sup", 
+"avg_talkPos")), use = "pairwise")
+
+cor_tab_fun <- function(r){
+  r$r <- apply(r$r, c(1,2), function(x) sprintf("%.2f", x))
+  r$r[which(r$p < .05, arr.ind = T)] <- 
+    sprintf("<strong>%s</strong>" ,r$r[which(r$p < .05, arr.ind = T)])
+  r$r[upper.tri(r$r, diag = F)] <- ""
+  diag(r$r) <- "--"
+  r <- r$r %>% data.frame %>%
+    rownames_to_column("item") %>%
+    as_tibble() %>%
+    mutate_all(as.character) %>%
+    select(item, everything()) %>%
+    mutate(item = sprintf("%i. %s", seq(1, ncol(r$r)), item)) %>%
+    setNames(c("item", seq(1, ncol(r$r)))) 
+  return(r)
+}
+```
+
+### Well-Being
+
+```{r}
+rq3a_wb_r <- rq1_corr_dat %>%
+  select(DEP, SWL, Negative_location, Positive_location, Negative_strength, Positive_strength) %>%
+  corr.test() %>%
+  cor_tab_fun() %>%
+    kable(
+    .
+    , "html"
+    , escape = F
+    , col.names = c("Variable", paste0(1:6, "."))
+    , align = c("l", rep("c", 6))
+    , caption = "<strong>Table X</strong><br><em>Correlations Among RQ1 Parameters and Well-Being</em>"
+  ) %>%
+  kable_classic(html_font = "Times")
+rq3a_wb_r
+  # save_kable(r, file = sprintf("../05-results/tables/px-r-tabs/%s-%s.html", sample, SID))
+
+rq3_er_r <- rq1_corr_dat %>%
+  select(
+    Negative_location, Positive_location, Negative_strength, Positive_strength
+    , avg_accept, avg_coRea, avg_dist, avg_mask, avg_min
+    , avg_posRea, avg_rem, avg_rum, avg_savor, avg_selApp, avg_selAv
+    , avg_socShr, avg_sup
+    ) %>%
+  corr.test() %>%
+  cor_tab_fun() %>%
+    kable(
+    .
+    , "html"
+    , escape = F
+    , col.names = c("Variable", paste0(1:18, "."))
+    , align = c("l", rep("c", 18))
+    , caption = "<strong>Table X</strong><br><em>Correlations Among RQ1 Parameters and Emotion Regulation Strategies</em>"
+  ) %>%
+  kable_classic(html_font = "Times")
+rq3_er_r
+```
+
+### Emotion Regulation Strategies
+
+## Main Effect ER Goals
+
+# Getting at Goal x Emotion Dynamics
+
+## 1. Extracting interaction parameters
+
+```{r}
+rq2_sum_negint<-nested_sum %>% 
+  unnest(fx) %>%
+   filter(.,model=="RQ2-int",emo_item=="Negative",ergoal=="goalNeg",parameter=="beta_ExER")%>%
+  select(.,c(SID,emo_item,mean))%>%
+  pivot_wider( names_from = emo_item, values_from =mean,names_glue = "{emo_item}_intstrength")
+
+rq2_sum_posint<-nested_sum %>% 
+  unnest(fx) %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER")%>%
+  select(.,c(SID,emo_item,mean))%>%
+  pivot_wider( names_from = emo_item, values_from =mean,names_glue = "{emo_item}_intstrength")
+
+rq2_corr_dat <-
+  rq1_corr_dat%>%left_join(.,rq2_sum_negint)%>%
+  left_join(.,rq2_sum_posint)
+
+corr.test(select(rq2_corr_dat,c(, "DEP", "SWL","Negative_location", "Positive_location", "Negative_strength", "Positive_strength","Negative_intstrength", "Positive_intstrength")),use = "complete")
+```
+
+## **2. Classifying direction of interaction**
+
+```{r}
+rq2_sum_negintb <- summ_df %>%
+   filter(.,model=="RQ2-int", emo_item=="Negative",ergoal=="goalNeg",parameter=="beta_ExER",abs(mean) < 10)%>%
+   mutate(int_pos = ifelse(mean > 0 & lower > 0 & upper > 0, 1, 0),
+          int_neg = ifelse(mean < 0 & lower <0 & upper < 0, 1, 0 ))%>%
+  mutate(int_ns = ifelse(int_pos==0 & int_neg==0, 1, 0))%>%
+  select(SID,int_pos, int_neg, int_ns)%>%
+   rename_with(~paste("Negative", ., sep = "_"), starts_with("int"))
+
+rq2_sum_posintb<-summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Positive",ergoal=="goalPos",parameter=="beta_ExER",abs(mean) < 10)%>%
+   mutate(int_pos = ifelse(mean > 0 & lower > 0 & upper > 0, 1, 0),
+          int_neg = ifelse(mean < 0 & lower <0 & upper < 0, 1, 0 ))%>%
+  mutate(int_ns = ifelse(int_pos==0 & int_neg==0, 1, 0))%>%
+  select(SID,int_pos, int_neg, int_ns)%>%
+   rename_with(~paste("Positive", ., sep = "_"), starts_with("int"))
+
+rq2_corr_dat<-
+  rq1_corr_dat%>%left_join(.,rq2_sum_negintb)%>%
+  left_join(.,rq2_sum_posintb)
+ 
+corr.test(select(rq2_corr_dat,c(, "DEP", "SWL","Negative_location", "Positive_location", "Negative_strength", "Positive_strength", "Negative_int_pos", "Negative_int_neg", 
+"Negative_int_ns","Positive_int_pos", "Positive_int_neg", 
+"Positive_int_ns")),use = "complete")
+```
+
+## **3. Looking at ER Goal Main Effect**
+
+```{r}
+rq2_sum_location <- summ_df  %>%
+  filter(.,model=="RQ2-main",parameter=="location",mean>0)%>%
+  select(.,c(SID,emo_item,mean,ergoal))%>%
+  pivot_wider( names_from = c(emo_item,ergoal), values_from =mean,names_glue = "{emo_item}_{ergoal}_location")
+
+rq2_sum_strength<- summ_df %>%
+  filter(.,model=="RQ2-main",parameter=="beta_ER")%>%
+  select(.,c(SID,emo_item,mean,ergoal))%>%
+  pivot_wider( names_from = c(emo_item,ergoal), values_from =mean,names_glue = "{emo_item}_{ergoal}_strength")
+
+
+wb_wide<-pivot_wider(wb_long, names_from = wb_item, values_from =wb_value)
+wb_wide$SID<-as.character(wb_wide$SID)
+
+rq2_corr_dat<-
+  left_join(rq2_sum_location,wb_wide)%>%
+  left_join(.,rq2_sum_strength,by="SID")
+
+dput(colnames(rq2_corr_dat))
+  
+corr.test(select(rq2_corr_dat,c(, "DEP", "SWL","Negative_goalNeg_location",
+"Positive_goalPos_location",
+"Negative_goalNeg_strength",
+"Positive_goalPos_strength")))
+```
+
+```{r}
+summ_df %>% 
+  filter(parameter == "beta_ExER") %>%
+  group_by(sign = sign(mean)) %>% 
+  group_by(emo_item, ergoal, sign) %>%
+  tally() %>% 
+  pivot_wider(names_from = c("ergoal", "sign"), values_from = "n")
+
+summ_df %>% 
+  filter(parameter == "beta_ER",model=="RQ2-int") %>%
+  group_by(sign = sign(mean)) %>% 
+  group_by(emo_item, ergoal, sign) %>%
+  tally() %>% 
+  pivot_wider(names_from = c("ergoal", "sign"), values_from = "n")
+```
+
+```{r}
+
+q1_ind_diff_p_fun <- function(d, term){
+  term2 <- mapvalues(term, c("location", "beta_E"), c("Attractor Location", "Attractor Strength"), warn_missing = F)
+  lims <- if(term == "location") c(0,10) else c(-2, 0)
+  brk <- if(term == "location") seq(0,10,2) else seq(-2, 0, .5)
+  p <- d %>%
+    ggplot(aes(y = emo_item, x = mean, group = emo_item)) + 
+    geom_density_ridges(aes(group = emo_item, fill = emo_item)) +
+    # geom_density_ridges(aes(group = emo_item), fill = "white", color = "white") +
+    scale_x_continuous(limits = lims, breaks = brk) +
+    # geom_errorbar(data = d %>% filter(SID == "overall")
+    #               , aes(xmin = `Q2.5`, xmax = `Q97.5`)
+    #               , position = "dodge"
+    #               , width = .1) + 
+    # geom_point(data = d %>% filter(SID == "overall")) +
+    geom_hline(aes(yintercept = 0), linetype = "dashed") +
+    labs(y = NULL
+         , x = sprintf("%s Estimate", term2)
+         , title = sprintf("Distributions of Person-Specific %s From RQ1", term2)
+         ) + 
+    # coord_flip() +
+    facet_grid(emo_group ~ ., scales = "free_y", space = "free") + 
+    my_theme() +
+    theme(legend.position = "none")
+  ggsave(p, file = sprintf("../05-results/RQ1/plots/dist/%s.png", term)
+       , width = 5, height = 7.5)
+  ggsave(p, file = sprintf("../05-results/RQ1/plots/dist/%s.pdf", term)
+       , width = 5, height = 7.5)
+  return(p)
+}
+
+nested_dist <- summ_df %>%
+  filter(!(term == "beta_E" & abs(mean) > 2.5) | !(term == "location" & mean < 0)) %>%
+  filter(model == "RQ1" & parameter %in% c("beta_E", "location")) %>%
+  mutate(emo_group = ifelse(emo_item %in% c("Negative", "Positive"), "Domains", ifelse(emo_item %in% c("Sad", "Guilty", "Angry", "Afraid"), "Discrete Negative Emotions", "Discrete Positive Emotions"))) %>%
+  group_by(parameter) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(p = map2(data, parameter, q1_ind_diff_p_fun))
+```
+
+## 4. Classifying direction of interaction term & main effect of goal
+
+```{r}
+rq2_sum_negintmain<-summ_df %>%
+   filter(.,model=="RQ2-int",emo_item=="Negative",ergoal=="goalNeg",parameter %in% c("beta_ExER", "beta_ER"),abs(mean) < 10)%>%
+  pivot_wider(names_from = parameter, values_from =c(mean,sd,lower,mid,upper))%>%
+  mutate(int_pos_m_pos = ifelse(mean_beta_ExER > 0 & lower_beta_ExER > 0 &
+                                  upper_beta_ExER > 0 & mean_beta_ER > 0 &
+                                  lower_beta_ER > 0 & upper_beta_ER > 0, 1, 0),
+          int_pos_m_neg = ifelse(mean_beta_ExER > 0 & lower_beta_ExER > 0 & upper_beta_ExER > 0
+                                 & mean_beta_ER < 0 & lower_beta_ER < 0 & upper_beta_ER < 0 ,1,
+                                 0),
+         int_neg_m_neg = ifelse(mean_beta_ExER < 0 & lower_beta_ExER < 0 & upper_beta_ExER < 0
+                                & mean_beta_ER < 0 & lower_beta_ER < 0 & upper_beta_ER < 0 , 1,
+                                0),
+         int_neg_m_pos = ifelse(mean_beta_ExER < 0 & lower_beta_ExER < 0 & upper_beta_ExER < 0
+                                & mean_beta_ER > 0 & lower_beta_ER > 0 & upper_beta_ER > 0 , 1,
+                                0))%>%
+           mutate(int_ns_m_pos = ifelse(int_pos_m_pos==0 & int_pos_m_neg==0 & 
+                                          int_neg_m_pos==0 & int_neg_m_neg==0 & 
+                                          
+                                          mean_beta_ER > 0 & lower_beta_ER > 0 & upper_beta_ER
+                                        > 0 , 1, 0),
+                  int_ns_m_neg = ifelse(int_pos_m_pos==0 & int_pos_m_neg==0 & 
+                                          int_neg_m_pos==0 & int_neg_m_neg==0 & 
+                                          mean_beta_ER < 0 & lower_beta_ER < 0 & upper_beta_ER
+                                        < 0, 1, 0),
+                  int_pos_m_ns = ifelse(int_pos_m_pos==0 & int_pos_m_neg==0 & 
+                                          int_neg_m_pos==0 & int_neg_m_neg==0 & 
+                                          mean_beta_ExER > 0 & lower_beta_ExER > 0 &
+                                          upper_beta_ExER > 0, 1, 0),
+                  int_neg_m_ns = ifelse(int_pos_m_pos==0 & int_pos_m_neg==0 & 
+                                          int_neg_m_pos==0 & int_neg_m_neg==0 & 
+                                          mean_beta_ExER < 0 & lower_beta_ExER < 0 &
+                                          upper_beta_ExER < 0, 1, 0))%>%
+  
+  mutate(int_ns_m_ns = ifelse(int_pos_m_pos==0 & int_pos_m_neg==0 &
+                                int_neg_m_pos==0 & int_neg_m_neg==0 &
+                                int_ns_m_pos==0 & int_ns_m_neg == 0 &
+                                int_pos_m_ns ==0 & int_neg_m_ns==0, 1, 0))%>%
+  
+  select(SID,starts_with("int"))%>%
+   rename_with(~paste("Negative", ., sep = "_"), starts_with("int"))
+
+describe(rq2_sum_negintmain)
+
+View(filter(rq2_sum_negintmain,SID=="15604"))
+
+
+rq2_corr_dat<-
+  rq1_corr_dat%>%left_join(.,negintmain)#%>%
+ # left_join(.,rq2_sum_posintb)
+ 
+
+corr.test(select(rq2_corr_dat,c(, "DEP", "SWL","Negative_location", "Positive_location", "Negative_strength", "Positive_strength", "Negative_int_pos", "Negative_int_neg", 
+"Negative_int_ns","Positive_int_pos", "Positive_int_neg", 
+"Positive_int_ns")),use = "complete")
+```
+
+## 5. Time that people were successful
+
+```{r}
+loadRData <- function(file, obj, rq){
+  file <- sprintf("../05-results/%s/success/%s", rq, file)
+  load(file)
+  get(ls()[grepl(obj, ls())])
+}
+
+nested_perc_data <- tibble(model = c("RQ2-int","RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/success", .)))) %>%
+  unnest(file) %>%
+  mutate(perc_data = pmap(list(file, "perc_data", model), loadRData)) %>% 
+  separate(file, c("study", "SID", "emo_item", "ergoal"), sep = "-") %>%
+  mutate_at(vars(emo_item, ergoal), ~str_remove_all(., ".RData"))
+
+pos_perc_data<-
+  nested_perc_data %>% 
+  unnest(perc_data) %>% 
+  filter(emo_item=="Positive")%>%
+  mutate(er_goal = recode(er_goal, "-2.5" = "de", "0" = "mt", "2.5" = "in"),zone=recode(zone, "Successful"="suc","Unsuccessful"="unsuc",Counterproductive="count"))%>%
+  filter(model == "RQ2-int") %>%
+  pivot_wider(
+    names_from = c("emo_item","zone","er_goal")
+    , values_from = "n"
+  ) 
+
+neg_perc_data<-
+  nested_perc_data %>% 
+  unnest(perc_data) %>% 
+  filter(emo_item=="Negative")%>%
+  mutate(er_goal = recode(er_goal, "-2.5" = "de", "0" = "mt", "2.5" = "in"),zone=recode(zone, "Successful"="suc","Unsuccessful"="unsuc",Counterproductive="count"))%>%
+  filter(model == "RQ2-int") %>%
+  pivot_wider(
+    names_from = c("emo_item","zone","er_goal")
+    , values_from = "n"
+  ) 
+
+# adding 0 for goals  people are predicted to never be successful/unsuccessful/counterproductive
+
+pos_perc_data[is.na(pos_perc_data)] <- 0
+neg_perc_data[is.na(neg_perc_data)] <- 0
+
+erstrat$SID<-as.character(erstrat$SID)
+
+corrdat5<-left_join(select(pos_perc_data,!c("ergoal","model")),select(neg_perc_data,!c("ergoal","model")),by="SID")%>%
+  left_join(.,wb_wide)%>%
+    left_join(.,select(erstrat,!"StartDate"))
+
+View(corrdat5)
+
+# Well-being outcomes
+corr.test(select(corrdat5,c("Positive_unsuc_de", "Positive_suc_mt", "Positive_unsuc_mt", 
+"Positive_suc_in", "Positive_unsuc_in", "Positive_suc_de", "Positive_count_in", 
+"Positive_count_de", "Negative_suc_de", "Negative_unsuc_de", 
+"Negative_suc_mt", "Negative_unsuc_mt", "Negative_suc_in", "Negative_unsuc_in", 
+"Negative_count_de", "Negative_count_in", "DEP", "SWL")))
+
+# depression
+# positive decrease successful r = -.18 (higher depression, less time decreasing positive emotions successfully)
+# negative increase successful r = -.21 (higher depression less time increasing negative emotions successfully)
+# negative decrease counterproductive r = .29 (higher depression more time that negative emotions actually increase when they want them to decrease)
+#  negative increase counterproductive r =.28 (higher depression more time that negative emotions actually decrease when they want them to increase)
+
+# SWL
+# negative decrease counterproductive r = -.20 (higher SWl, less time counterproductive decreasing of negative affect)
+
+
+
+corr.test(select(corrdat5,c("Positive_unsuc_de", "Positive_suc_mt", "Positive_unsuc_mt", 
+"Positive_suc_in", "Positive_unsuc_in", "Positive_suc_de", "Positive_count_in", 
+"Positive_count_de", "Negative_suc_de", "Negative_unsuc_de", 
+"Negative_suc_mt", "Negative_unsuc_mt", "Negative_suc_in", "Negative_unsuc_in", 
+"Negative_count_de", "Negative_count_in","er_strat_rep")))
+
+# Positive_unsuc_mt - r =-.18, lower repertoire 
+# Positive_suc_de - r =-.46 lower repertoire
+# Positive_count_in - r = -.23 lower repertoire
+# Negative_suc_de - r =-.28 lower repertoire
+# Negative_suc_in - r = -0.52 lower repertoire
+
+
+corr.test(select(corrdat5,c("Positive_unsuc_de", "Positive_suc_mt", "Positive_unsuc_mt", 
+"Positive_suc_in", "Positive_unsuc_in", "Positive_suc_de", "Positive_count_in", 
+"Positive_count_de", "Negative_suc_de", "Negative_unsuc_de", 
+"Negative_suc_mt", "Negative_unsuc_mt", "Negative_suc_in", "Negative_unsuc_in", 
+"Negative_count_de", "Negative_count_in", "avg_accept", "avg_coRea", 
+"avg_dist", "avg_mask", "avg_min", "avg_posRea", "avg_rem", "avg_rum", 
+"avg_savor", "avg_selApp", "avg_selAv", "avg_socShr", "avg_sup", 
+"avg_talkPos")))
+
+
+## acceptance 
+# pos suc mt r=  0.17 
+# pos unsuc mt r =  -0.23
+# Positive_count_in r =-0.25
+# negative unsuc de r = -0.21
+
+## coRea
+# nothing
+
+##distraction
+#Negative_unsuc_de  r=-0.19
+#Negative_unsuc_in r = -0.22
+
+##mask
+#Positive_unsuc_mt 
+# Negative_unsuc_de
+# Negative_unsuc_in
+
+##pos reapp
+# Positive_unsuc_mt 
+
+## reminiscing
+# nothing
+
+# rumination
+# Negative_unsuc_in
+
+## savoring
+# nothing
+
+##selection approach or avoid 
+# nothing 
+
+
+## social sharing
+# positive succ mt
+# positive unsuc mt 
+#Positive_suc_de
+# Negative_suc_de
+
+## suppression
+# Positive_unsuc_mt r= -0.19
+# Negative_unsuc_de r =  -0.26
+# Negative_unsuc_in r =  -0.23
+
+## talk pos - capitalization
+# Negative_suc_de
+# Negative_suc_mt
+
+
+# do one version with combining counter and unsuccessful 
+
+View(corrdat5)
+
+View(select(pos_perc_data,c("Positive_suc_in", "Positive_unsuc_in", "Positive_count_in")))
+       
+dput(colnames(pos_perc_data)) 
+```
+
+## 6. Location & Strength when considering Goals
+
+```{r}
+rq2_corr_dat <- summ_df %>% 
+  filter(model == "RQ2-int" & parameter %in% c("location_decrease" , "location_maintain"  , "location_increase",
+       "strength_decrease",
+       "strength_maintain",
+       "strength_increase")) %>%
+  filter((ergoal=="goalNeg"&emo_item=="Negative")|(ergoal=="goalPos"&emo_item=="Positive"))%>%
+  select(SID, emo_item, parameter, mean)%>%
+  pivot_wider(
+    names_from = c("emo_item", "parameter")
+    , values_from = "mean"
+  )%>%
+  full_join(
+    wb_long %>%
+      pivot_wider(names_from = wb_item, values_from =wb_value) %>% 
+      mutate(SID = as.character(SID)) %>%
+      select(SID, DEP, SWL)
+  ) %>%
+  left_join(
+    erstrat %>% 
+      select(SID, er_strat_rep:avg_talkPos) %>%
+      mutate(SID = as.character(SID))
+    )
+
+dput(colnames(rq2_corr_dat))
+
+summ_rq2 <- summ_df %>%
+  filter(model == "RQ2-int" & emo_item %in% c("Negative", "Positive") & parameter %in% c( "strength_decrease",
+       "strength_maintain",
+       "strength_increase")) %>%
+  group_by(emo_item, parameter) %>%
+  rename(est = mean) %>%
+  summarize(
+    mean   = mean(est,na.rm=T),
+    sd     = sd(est,na.rm=T),
+    min    = min(est,na.rm=T),
+    max    = max(est,na.rm=T),
+    median = median(est,na.rm=T),
+    iqr    = IQR(est,na.rm=T)
+  ) %>%
+  ungroup() %>%
+  mutate(
+    parameter = factor(
+      parameter, c( "strength_decrease",
+       "strength_maintain",
+       "strength_increase"), 
+      c("Decrease",
+       "Maintain",
+       "Increase")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    )
+
+#View(summ_rq2)
+
+summ_df %>%
+  filter(model == "RQ2-int" & emo_item %in% c("Negative", "Positive") & parameter %in% c(
+       "strength_decrease",
+       "strength_maintain",
+       "strength_increase")) %>%
+    filter((ergoal=="goalNeg"&emo_item=="Negative")|(ergoal=="goalPos"&emo_item=="Positive"))%>%
+  mutate(
+    parameter = factor(
+      parameter, c(
+       "strength_decrease",
+       "strength_maintain",
+       "strength_increase"), 
+      c( "Decrease",
+       "Maintain",
+       "Increase")
+      )
+    , emo_item = factor(
+      emo_item, c("Negative", "Positive")
+      , c("Negative Emotion", "Positive Emotion")
+      )
+    ) %>%
+   ggplot(aes(x = mean)) + 
+    geom_histogram(aes(fill = emo_item), alpha = .5, color = "black")+ #+ 
+    # geom_text(
+    #   data = summ_rq2 %>% mutate(pos = ifelse(parameter == "Increase", -6.5, ifelse(parameter =="Maintain",-5.5,-9.5)))
+    #   , aes(
+    #     label = sprintf("M = %.2f\n(SD = %.2f)", median, sd)
+    #     , x = pos, y = 80
+    #     )
+    #     , hjust = 0, vjust = 1
+    #   ) +
+    scale_fill_manual(values = c("red3", "goldenrod2")) + 
+    labs(
+      x = "Attractor Strength"
+      , y = "Density"
+      , title = "Individual Differences in Attractor Strength Estimates"
+    ) + 
+    facet_grid(emo_item ~ parameter) + 
+    my_theme() + 
+   theme(legend.position = "none")
+
+
+corr.test(select(rq2_corr_dat,c(, "Negative_location_maintain", "Negative_strength_decrease", 
+"Negative_strength_maintain", "Negative_strength_increase", "Positive_location_maintain", 
+"Positive_location_increase", "Positive_strength_decrease", "Positive_strength_maintain", 
+"Positive_strength_increase", "Negative_location_decrease", "Negative_location_increase", 
+"Positive_location_decrease", "DEP", "SWL"
+# , "er_strat_rep", "avg_accept", 
+# "avg_coRea", "avg_dist", "avg_mask", "avg_min", "avg_posRea", 
+# "avg_rem", "avg_rum", "avg_savor", "avg_selApp", "avg_selAv", 
+# "avg_socShr", "avg_sup", "avg_talkPos"
+)), use = "pairwise")
+
+
+corr.test(select(rq2_corr_dat,c( "Negative_strength_decrease", 
+"Negative_strength_maintain", "Negative_strength_increase", "Positive_strength_decrease", "Positive_strength_maintain", 
+"Positive_strength_increase", "DEP", "SWL"
+# , "er_strat_rep", "avg_accept", 
+# "avg_coRea", "avg_dist", "avg_mask", "avg_min", "avg_posRea", 
+# "avg_rem", "avg_rum", "avg_savor", "avg_selApp", "avg_selAv", 
+# "avg_socShr", "avg_sup", "avg_talkPos"
+)), use = "pairwise")
+
+
+corr.test(select(rq2_corr_dat,c( "Negative_strength_decrease", 
+"Negative_strength_maintain", "Negative_strength_increase", "Positive_strength_decrease", "Positive_strength_maintain", 
+"Positive_strength_increase", #"DEP", "SWL"
+, "er_strat_rep", "avg_accept",
+"avg_coRea", "avg_dist", "avg_mask", "avg_min", "avg_posRea",
+"avg_rem", "avg_rum", "avg_savor", "avg_selApp", "avg_selAv",
+"avg_socShr", "avg_sup", "avg_talkPos"
+)), use = "pairwise")
+```
+
+## Tables
+
+```{r}
+loadRData <- function(file, obj, rq){
+  file <- sprintf("../05-results/%s/fx/%s", rq, file)
+  load(file)
+  get(ls()[grepl(obj, ls())])
+}
+
+nested_sum <- tibble(model = c("RQ1", "RQ2-int", "RQ2-main")) %>%
+  mutate(file = map(model, ~list.files(sprintf("../05-results/%s/fx", .)))) %>%
+  unnest(file) %>%
+  mutate(fx = pmap(list(file, "fx", model), loadRData)) %>%
+  separate(file, c("study", "SID", "emo_item", "ergoal"), sep = "-") %>%
+  mutate_at(vars(emo_item, ergoal), ~str_remove_all(., ".RData"))
+
+issues_nested <- nested_sum %>%
+  unnest(fx) %>% 
+  filter(
+    (sd > 10 | 
+    (parameter == "beta_E" & sign(mean) == 1 | abs(mean) > 10) | 
+    (parameter == "location" & abs(mean) > 10))
+    )
+```
+
+```{r}
+nested_res <- nested_sum %>%
+  anti_join(
+    issues_nested %>%
+      select(model:ergoal) %>%
+      distinct()
+  ) 
+```
+
+### RQ1
+
+```{r}
+tab_res <- nested_res %>% 
+  unnest(fx) %>%
+  mutate(sig = ifelse(sign(lower) == sign(upper), "sig", "ns")) %>%
+  group_by(model, study, emo_item, ergoal, parameter) %>%
+  summarize(
+    sd = sd(mean)
+    , min = min(mean)
+    , max = max(mean)
+    , mean = mean(mean)
+    , sig = sum(sig == "sig")/n()
+    ) %>%
+  ungroup() %>%
+  mutate(focal = ifelse(
+    (emo_item %in% c("Positive", "Negative") & is.na(ergoal)) | 
+    (emo_item == "Positive" & ergoal == "goalPos") | 
+    (emo_item == "Negative" & ergoal == "goalNeg"), "focal", "sup")
+    ) %>%
+  filter(!parameter %in% c("mu_E", "sigma_E")) %>%
+  mutate(
+    est = sprintf("%.2f (%.2f)", mean, sd)
+    , range = sprintf("%.2f - %.2f", min, max)
+    , sig = sprintf("%.2f%%", sig*100)
+    ) %>%
+  select(model:parameter, focal, est, range, sig)
+  
+```
+
+```{r}
+
+rq1_tab_fun <- function(d, focal){
+  rs <- d %>% group_by(emo_item) %>% tally() %>% 
+      mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+  hdr <- c(1, 3, 3)
+  names(hdr) <- c(" ", "<strong>CPE</strong>", "<strong>PP</strong>")
+  tab <- d %>%
+    select(-emo_item) %>%
+    kable(
+      .
+      , "html"
+      , escape = F
+      , caption = "<strong>Table X</strong><br><em>Summaries of individual differences in attractor location and strength from univariate models (RQ1)</em>"
+      , col.names = c("<strong>Parameter</strong>", rep(c("<strong><em>M</em> (<em>SD</em>)</strong>", "<strong>Range</strong>", "<strong>% Sig</strong>"), times = 2))
+      , align = c("l", rep("c", 6))
+    ) %>%
+    kable_classic(html_font = "Times") %>%
+    add_header_above(hdr, escape = F)
+  # for loop to add grouped sections 
+  for (i in 1:nrow(rs)){
+    tab <- tab %>% 
+      kableExtra::group_rows(rs$emo_item[i], rs$start[i], rs$end[i]) 
+  }
+  save_kable(tab, file = sprintf("../05-results/tables/RQ1/key-terms/tabSx-rq1-%s.html", focal))
+  return(tab)
+}
+
+rq1_tabs <- tab_res %>%
+  filter(model == "RQ1") %>%
+  mutate(parameter = factor(parameter, c("location", "beta_E"), c("Location", "Strength"))) %>%
+  pivot_wider(
+    names_from = "study"
+    , values_from = c("est", "range", "sig")
+  ) %>%
+  select(emo_item:focal, matches("_cpe"), matches("_pp"), -ergoal) %>%
+  group_by(focal) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, focal, possibly(rq1_tab_fun, NA_real_)))
+```
+
+### RQ2 Main
+
+```{r}
+rq2_tab_fun <- function(d, focal){
+  d <- d %>%
+    mutate(ergoal = mapvalues(ergoal, c("goalNeg", "goalPos"), c("Negative Emotion Goals", "Positive Emotion Goals")), 
+           comb = sprintf("%s: %s", ergoal, emo_item))
+  rs <- d %>% group_by(comb) %>% tally() %>% 
+      mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+  hdr <- c(1, 3, 3)
+  names(hdr) <- c(" ", "<strong>CPE</strong>", "<strong>PP</strong>")
+  tab <- d %>%
+    select(-emo_item, -ergoal, -comb) %>%
+    kable(
+      .
+      , "html"
+      , escape = F
+      , caption = "<strong>Table X</strong><br><em>Summaries of individual differences in attractor location and strength and congruence between emotion regulation goals and changes in emotion from univariate models (RQ2, main effects)</em>"
+      , col.names = c("<strong>Parameter</strong>", rep(c("<strong><em>M</em> (<em>SD</em>)</strong>", "<strong>Range</strong>", "<strong>% Sig</strong>"), times = 2))
+      , align = c("l", rep("c", 6))
+    ) %>%
+    kable_classic(html_font = "Times", full_width = F) %>%
+    add_header_above(hdr, escape = F)
+  # for loop to add grouped sections 
+  for (i in 1:nrow(rs)){
+    tab <- tab %>% 
+      kableExtra::group_rows(rs$comb[i], rs$start[i], rs$end[i]) 
+  }
+  save_kable(tab, file = sprintf("../05-results/tables/RQ2-main/key-terms/tabSx-rq2main-%s.html", focal))
+  return(tab)
+}
+
+rq2_tabs <- tab_res %>%
+  filter(model == "RQ2-main") %>%
+  mutate(parameter = factor(parameter, c("location", "beta_E", "beta_ER"), c("Location", "Strength", "Congruence"))) %>%
+  arrange(emo_item, ergoal, parameter) %>%
+  pivot_wider(
+    names_from = "study"
+    , values_from = c("est", "range", "sig")
+  ) %>%
+  select(emo_item:focal, matches("_cpe"), matches("_pp")) %>%
+  group_by(focal) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, focal, possibly(rq2_tab_fun, NA_real_)))
+```
+
+### RQ2 Interactions
+
+```{r}
+rq2int_tab_fun <- function(d, focal){
+  d <- d %>%
+    mutate(ergoal = mapvalues(ergoal, c("goalNeg", "goalPos"), c("Negative Emotion Goals", "Positive Emotion Goals")), 
+           comb = sprintf("%s: %s", ergoal, emo_item))
+  rs <- d %>% group_by(comb) %>% tally() %>% 
+      mutate(end = cumsum(n), start = lag(end) + 1, start = ifelse(is.na(start), 1, start))
+  hdr <- c(1, 3, 3)
+  names(hdr) <- c(" ", "<strong>CPE</strong>", "<strong>PP</strong>")
+  tab <- d %>%
+    select(-emo_item, -ergoal, -comb) %>%
+    kable(
+      .
+      , "html"
+      , escape = F
+      , caption = "<strong>Table X</strong><br><em>Summaries of individual differences in attractor location and strength and congruence between emotion regulation goals and changes in emotion from univariate models (RQ3, interaction)</em>"
+      , col.names = c("<strong>Parameter</strong>", rep(c("<strong><em>M</em> (<em>SD</em>)</strong>", "<strong>Range</strong>", "<strong>% Sig</strong>"), times = 2))
+      , align = c("l", rep("c", 6))
+    ) %>%
+    kable_classic(html_font = "Times", full_width = F) %>%
+    add_header_above(hdr, escape = F)
+  # for loop to add grouped sections 
+  for (i in 1:nrow(rs)){
+    tab <- tab %>% 
+      kableExtra::group_rows(rs$comb[i], rs$start[i], rs$end[i]) 
+  }
+  save_kable(tab, file = sprintf("../05-results/tables/RQ2-int/key-terms/tabSx-rq2int-%s.html", focal))
+  return(tab)
+}
+
+rq2int_tabs <- tab_res %>%
+  filter(model == "RQ2-int") %>%
+  mutate(parameter = factor(
+    parameter
+    , c("location", "beta_E", "beta_ER", "beta_ExER")
+    , c("Location", "Strength", "Congruence", "Interaction")
+    )) %>%
+  arrange(emo_item, ergoal, parameter) %>%
+  pivot_wider(
+    names_from = "study"
+    , values_from = c("est", "range", "sig")
+  ) %>%
+  select(emo_item:focal, matches("_cpe"), matches("_pp")) %>%
+  group_by(focal) %>%
+  nest() %>%
+  ungroup() %>%
+  mutate(tab = map2(data, focal, rq2int_tab_fun))
+```
